@@ -1,0 +1,19 @@
+{
+  "name": "swc-ssr",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Server-side rendering + hydration support for Adobe Spectrum Web Components (1st-gen) as a plugin for @lit-labs/ssr. No changes to Spectrum sources.",
+  "exports": {
+    "./server": "./src/server/index.ts",
+    "./client": "./src/client/index.ts",
+    "./dom-shim": "./src/dom-shim/index.ts",
+    "./package.json": "./package.json"
+  },
+  "peerDependencies": {
+    "@lit-labs/ssr": "^4.1.0",
+    "@lit-labs/ssr-client": "^1.1.8",
+    "@lit-labs/ssr-dom-shim": "^1.6.0",
+    "lit": "^3.3.0"
+  }
+}
