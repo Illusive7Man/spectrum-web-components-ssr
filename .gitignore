@@ -6,3 +6,6 @@ playwright-report/
 .playwright/
 *.log
 .DS_Store
+tests/results/screenshots/
+tests/results/fidelity/
+tests/results/raw.jsonl

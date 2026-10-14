@@ -119,7 +119,8 @@ Hard constraint: **no edits to any `@spectrum-web-components/*` source**. Everyt
 
 `sp-theme`: a dedicated `ThemeRenderer` (matches `registerThemeFragment` static) that emits the theme fragment CSS for
 the element's `system`/`color`/`scale` (plus `core`/`global` fragments) as `<style>` inside its DSD and `<slot></slot>`
-- this is what the real Theme does with `adoptedStyleSheets`. Also sets `dir`.
+- this is what the real Theme does with `adoptedStyleSheets`. It does not set `dir` (1.12's Theme does not either; an
+extra attribute would differ from the client-rendered DOM).
 
 ### DOM shim extras (`swc-ssr/dom-shim`)
 
@@ -169,7 +170,66 @@ unblock) vs after hydration is complete; pixel diff must be below a threshold, a
 must be ~0; (5) **fidelity**: the post-hydration DOM (light + shadow, serialized with attributes sorted and lit comments
 stripped) equals the CSR reference DOM of `/csr/:name`; (6) interaction smoke: clicking a button/picker/checkbox works after
 hydration. The runner writes `tests/results/summary.md` (a table: component -> SSR ok / hydrate ok / flicker px / fidelity)
-so that every run shows the current support matrix.
+so that every run shows the current support matrix. `tests/all-components.spec.ts` checks the whole-catalog page `GET /`
+(SSR markup with every section, render report, hydration without errors / deferred elements / console errors) and
+`GET /csr`; it is reported as the `all-components` row of a separate "Pages" table (not counted as a component).
+
+Fidelity normalization (`tests/helpers/dom.ts`): generated ids in id / id-reference attributes (Spectrum's `randomID()`
+suffixes and instance counters) are compared by reference structure (`<prefix>#n` in order of first appearance), and
+form controls by live state (`.value` / `.checked` instead of the `value` / `checked` attributes and textarea content,
+which the server uses to transport property bindings), `style` attributes by their declarations (CSSOM `cssText`).
+The interaction smoke test clicks the first control that is visible, enabled and actually receives pointer events. Check (1) skips `sp-*` elements that never have a shadow root
+(`sp-tooltip-openable`, a plain `HTMLElement` in `tooltip/src/Tooltip.js`).
+
+## Integration findings (Oct 2026)
+
+Server (`swc-ssr/server`, all outside Spectrum sources):
+
+* Render order: pass-2 elements connect and run their first update tree scope by tree scope (light DOM before the
+  shadow content of its hosts, document order within a scope), the order client-side rendering creates them in.
+* An element's own shadow content from the previous pass (its render root facade) is only exposed once its first
+  update in the current pass has rendered, as in client-side rendering; before that (constructor, setters,
+  `connectedCallback`, Lit's `wrapped` property initialization, `willUpdate`, `hostUpdate`) the render root is empty.
+  The markup cannot carry property bindings of plain shadow elements (`.model=${...}` on `sp-slider`'s handle
+  inputs), so earlier exposure made `sp-slider` throw on pages that need a third pass (e.g. together with `sp-dialog`).
+  A throwing `wrapped` getter is reported per element (`initialize wrapped property <name>`), never fatal.
+* `materialize()` before each server render: DOM nodes in text positions become text / raw HTML regions without
+  template-level hydration markers (the client hydrates a node value as an opaque leaf); boolean property bindings on
+  plain elements (`.checked=${false}`, which @lit-labs/ssr 4.1.0 would emit as `checked="false"`) are emitted as a bare
+  attribute or not at all; textarea `.value` bindings become the textarea's text content.
+* The element-binding marker attribute that @lit-labs/ssr 4.1.0 passes to custom element renderers as a static
+  attribute (`lit$123$8=""`) is never applied.
+* Lazily imported elements (`sp-slider` imports `sp-number-field` in `render()`): @lit-labs/ssr decides once per
+  template whether a tag is a custom element. A render waits briefly (once per tag) for definitions its templates
+  referenced while undefined and repeats pass 1 when they arrive; templates seen with an undefined tag get a fresh
+  strings array once it is defined, so later renders are not stuck with a plain element.
+* The initial `slotchange` emulation delivers one event per slot with assigned nodes and lets it bubble to listeners
+  on ancestor slots (`help-text/src/HelpTextManager.js`); bound slots with generated names are matched by position.
+* Attribute changes components make on plain (non-custom) elements - in the light DOM (ids for `aria-labelledby`
+  targets in dialogs, menu groups, split view) and in shadow roots (e.g. the `tabindex` / `disabled` checkbox moves
+  onto its input) - are written into the output (`light-mutations.ts`), so the references resolve without
+  JavaScript and the client reuses those ids instead of adding a second set.
+* The initial `slotchange` emulation also dispatches one event at the shadow root (`swatch/src/SwatchGroup.js` listens
+  there). Client and server share the binding detection (`src/shared/slot-bindings.ts`).
+* DOM shim: HTML constraint validation for form controls (`required`, `pattern`, `type`, `min`/`max`), the Popover API
+  (so `overlay/src/Overlay.js` picks the same strategy and renders the same `popover` attribute as in browsers).
+* Adapters for layout-dependent state (`sp-breadcrumbs`, `sp-split-view`, `sp-color-wheel`): computed from design tokens /
+  "enough room" instead of zero sizes.
+
+Client (`swc-ssr/client`, `hooks.ts`): the first client render must match the server markup, which shows the settled
+state. Hydration adapters restore server state before the hydrating update (`sp-picker` selected item,
+`sp-breadcrumbs` overflow state) or hide server-rendered shadow content from code that runs before the first render
+(`sp-slider` handle cache); the initial `slotchange` is emulated before hydrating when it changes what the element
+renders, otherwise after the hydrating update (CSR timing); a remaining mismatch re-renders that element on the client
+and is reported. Server output is rendered with `deferHydration: true` and the light-DOM elements are enabled in
+document order, so first updates run in CSR order regardless of the order definitions load in.
+
+Known differences that remain (see `tests/results/summary.md`): light-DOM insertions made by components on the server
+(e.g. `sp-table` checkbox cells) are not rendered; state that depends on timing in client-side rendering (which item of a
+menu starts with `tabindex="0"` in `sp-picker` / `sp-action-menu` in `sp-breadcrumbs`) can settle differently, and an
+element's first client update sees the server's final attributes (`sp-swatch` sets `focusable` on the selected swatch).
+Layout-dependent values are approximated without layout (`sp-tabs` selection indicator, `sp-color-area` handle) and
+corrected after hydration.
 
 ## Coding conventions
 

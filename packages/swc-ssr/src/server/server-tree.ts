@@ -1,0 +1,250 @@
+/**
+ * The server tree: the pass-1 HTML parsed with parse5 + the htmlparser2 tree adapter (domhandler nodes), so
+ * `css-select` can run real selectors over it.
+ *
+ * With the htmlparser2 adapter a `<template>`'s content is a `Document` node that is the template's only child.
+ * Declarative shadow roots (`<template shadowrootmode>`) are detached from their host while indexing: the host's
+ * `children` then contain only its light DOM, and the shadow content is reachable through `shadowRoot(id)` /
+ * `shadowOf(node)`. Light-DOM queries therefore never see shadow content and vice versa, like in a browser.
+ */
+import {parse, parseFragment} from 'parse5';
+import {adapter as htmlparser2Adapter} from 'parse5-htmlparser2-tree-adapter';
+import {selectAll, selectOne} from 'css-select';
+import type {AnyNode, ChildNode, Document, Element, ParentNode, Text} from 'domhandler';
+
+export const MARKER_ATTRIBUTE = 'data-swc-ssr';
+
+const isElementNode = (node: AnyNode | null | undefined): node is Element =>
+  !!node && (node.type === 'tag' || node.type === 'script' || node.type === 'style');
+const isTextNode = (node: AnyNode | null | undefined): node is Text => !!node && node.type === 'text';
+const isDocumentNode = (node: AnyNode | null | undefined): node is Document => !!node && node.type === 'root';
+
+/** True if the HTML is a whole document (a doctype or `<html>` after leading whitespace / comments). */
+function isDocumentHtml(html: string): boolean {
+  let index = 0;
+  for (;;) {
+    while (index < html.length && /\s/.test(html[index])) {
+      index++;
+    }
+    if (html.startsWith('<!--', index)) {
+      const end = html.indexOf('-->', index + 4);
+      if (end === -1) {
+        return false;
+      }
+      index = end + 3;
+      continue;
+    }
+    return /^<(?:!doctype|html[\s>])/i.test(html.slice(index, index + 10));
+  }
+}
+
+const STYLE_RE = /(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi;
+const STYLE_PLACEHOLDER = 'swc-ssr-style:';
+const STYLE_PLACEHOLDER_RE = /\/\*swc-ssr-style:(\d+)\*\//g;
+
+const VOID_ELEMENTS = new Set([
+  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr',
+]);
+const RAW_TEXT_ELEMENTS = new Set(['script', 'style', 'xmp', 'iframe', 'noembed', 'noframes', 'plaintext']);
+
+const escapeText = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const escapeAttribute = (text: string) => text.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+
+export class ServerTree {
+  readonly root: Document;
+  private readonly nodesById = new Map<number, Element>();
+  private readonly idsByNode = new Map<Element, number>();
+  private readonly shadows = new Map<Element, Document>();
+  private readonly hosts = new Map<Document, Element>();
+  private readonly shadowTemplateAttributes = new Map<Document, Record<string, string>>();
+  /** Marked elements in construction order (element, its shadow content, then its light children). */
+  private readonly ordered: Element[] = [];
+
+  /** CSS of `<style>` elements, replaced by short placeholders before parsing (see constructor). */
+  private readonly styles: string[] = [];
+
+  constructor(html: string) {
+    // Most of the pass-1 HTML is CSS (every shadow root carries its styles). It is irrelevant for the tree, so
+    // it is swapped for placeholders before parsing (much less tokenizing and garbage) and restored when the
+    // tree is serialized.
+    const compact = html.replace(STYLE_RE, (match, open: string, css: string, close: string) => {
+      if (css.length < 64) {
+        return match;
+      }
+      this.styles.push(css);
+      return `${open}/*${STYLE_PLACEHOLDER}${this.styles.length - 1}*/${close}`;
+    });
+    const parseHtml = isDocumentHtml(compact) ? parse : parseFragment;
+    this.root = parseHtml(compact, {treeAdapter: htmlparser2Adapter}) as unknown as Document;
+    this.index(this.root);
+  }
+
+  private restoreStyles(text: string): string {
+    return text.includes(STYLE_PLACEHOLDER)
+      ? text.replace(STYLE_PLACEHOLDER_RE, (match, index: string) => this.styles[Number(index)] ?? match)
+      : text;
+  }
+
+  private index(parent: ParentNode): void {
+    for (const child of [...parent.children]) {
+      if (!isElementNode(child)) {
+        continue;
+      }
+      const marker = child.attribs[MARKER_ATTRIBUTE];
+      if (marker !== undefined) {
+        const id = Number(marker);
+        if (Number.isInteger(id)) {
+          this.nodesById.set(id, child);
+          this.idsByNode.set(child, id);
+          this.ordered.push(child);
+        }
+      }
+      const template = child.children.find(
+        (node): node is Element =>
+          isElementNode(node) &&
+          node.name === 'template' &&
+          (node.attribs.shadowrootmode !== undefined || node.attribs.shadowroot !== undefined)
+      );
+      if (template && !this.shadows.has(child)) {
+        const content = template.children.find(isDocumentNode);
+        detach(template);
+        if (content) {
+          // The content fragment is the template's child: make it a root of its own.
+          detach(content as unknown as ChildNode);
+          this.shadows.set(child, content);
+          this.hosts.set(content, child);
+          this.shadowTemplateAttributes.set(content, {...template.attribs});
+          this.index(content);
+        }
+      }
+      if (child.name !== 'template') {
+        this.index(child);
+      }
+    }
+  }
+
+  /** Marked element of the pass-1 element with this id. */
+  byId(id: number): Element | undefined {
+    return this.nodesById.get(id);
+  }
+
+  /** Pass-1 id of a marked element. */
+  idOf(node: AnyNode): number | undefined {
+    return isElementNode(node) ? this.idsByNode.get(node) : undefined;
+  }
+
+  /** Marked elements in construction (document) order. */
+  markedNodes(): readonly Element[] {
+    return this.ordered;
+  }
+
+  /** Light-DOM child nodes (elements and text, no comments) of the element with this id. */
+  lightChildren(id: number): ChildNode[] {
+    const node = this.nodesById.get(id);
+    return node ? childNodes(node) : [];
+  }
+
+  /** Shadow root content (a `Document` node) of the element with this id. */
+  shadowRoot(id: number): Document | undefined {
+    const node = this.nodesById.get(id);
+    return node ? this.shadows.get(node) : undefined;
+  }
+
+  shadowOf(node: Element): Document | undefined {
+    return this.shadows.get(node);
+  }
+
+  /** Host element of a shadow root content node. */
+  hostOf(shadow: Document): Element | undefined {
+    return this.hosts.get(shadow);
+  }
+
+  isShadowRoot(node: AnyNode): node is Document {
+    return isDocumentNode(node) && this.hosts.has(node);
+  }
+
+  /** First descendant of `node` (light DOM / shadow content only) matching `selector` (static attributes). */
+  query(node: ParentNode, selector: string): Element | null {
+    return selectOne(selector, node.children as AnyNode[]) as Element | null;
+  }
+
+  /** All descendants of `node` matching `selector` (static attributes). */
+  queryAll(node: ParentNode, selector: string): Element[] {
+    return selectAll(selector, node.children as AnyNode[]) as Element[];
+  }
+
+  /** Serializes the shadow content of the element with this id, re-attaching nested declarative shadow roots. */
+  serializeShadow(id: number): string | undefined {
+    const shadow = this.shadowRoot(id);
+    return shadow ? this.serializeChildren(shadow) : undefined;
+  }
+
+  serializeChildren(parent: ParentNode): string {
+    let out = '';
+    for (const child of parent.children) {
+      out += this.serialize(child as AnyNode, isElementNode(parent as AnyNode) && RAW_TEXT_ELEMENTS.has((parent as Element).name));
+    }
+    return out;
+  }
+
+  private serialize(node: AnyNode, raw = false): string {
+    if (isTextNode(node)) {
+      return raw ? this.restoreStyles(node.data) : escapeText(node.data);
+    }
+    if (node.type === 'comment') {
+      return `<!--${node.data}-->`;
+    }
+    if (isDocumentNode(node)) {
+      return this.serializeChildren(node);
+    }
+    if (!isElementNode(node)) {
+      return '';
+    }
+    let out = `<${node.name}`;
+    for (const [name, value] of Object.entries(node.attribs)) {
+      out += value === '' ? ` ${name}` : ` ${name}="${escapeAttribute(value)}"`;
+    }
+    out += '>';
+    if (VOID_ELEMENTS.has(node.name)) {
+      return out;
+    }
+    const shadow = this.shadows.get(node);
+    if (shadow) {
+      const attributes = this.shadowTemplateAttributes.get(shadow) ?? {shadowrootmode: 'open'};
+      let template = '<template';
+      for (const [name, value] of Object.entries(attributes)) {
+        template += value === '' ? ` ${name}` : ` ${name}="${escapeAttribute(value)}"`;
+      }
+      out += `${template}>${this.serializeChildren(shadow)}</template>`;
+    }
+    return `${out}${this.serializeChildren(node)}</${node.name}>`;
+  }
+}
+
+/** Child nodes the DOM would expose (elements and text; comments such as Lit markers are skipped). */
+export function childNodes(parent: ParentNode): ChildNode[] {
+  return parent.children.filter((node) => isElementNode(node) || isTextNode(node));
+}
+
+function detach(node: ChildNode): void {
+  const parent = node.parent;
+  if (!parent) {
+    return;
+  }
+  const index = parent.children.indexOf(node);
+  if (index !== -1) {
+    parent.children.splice(index, 1);
+  }
+  if (node.prev) {
+    node.prev.next = node.next;
+  }
+  if (node.next) {
+    node.next.prev = node.prev;
+  }
+  node.parent = null;
+  node.prev = null;
+  node.next = null;
+}
+
+export {isElementNode, isTextNode, isDocumentNode};
+export type {Element as TreeElementNode, Document as TreeDocumentNode, AnyNode as TreeNode, Text as TreeTextNode};
