@@ -1,6 +1,6 @@
 import 'swc-ssr/client'; // must stay the FIRST import: installs lit's hydration support before lit / Spectrum load
 import {hydrateSpectrum, hydrationReport} from 'swc-ssr/client';
-import type {HydrationReport} from 'swc-ssr/client';
+import type {HydrateSpectrumOptions, HydrationReport} from 'swc-ssr/client';
 import {render} from 'lit';
 import {findEntry} from './catalog/index.js';
 import type {CatalogEntry} from './catalog/types.js';
@@ -16,15 +16,23 @@ import {pageTemplate} from './page.js';
  *   window.__swcSsrMode        'ssr' | 'csr'
  *   window.__swcSsrHydration   Promise<HydrationReport>, set synchronously, resolves when the page has settled
  *   window.__swcSsrReport()    the current HydrationReport (swc-ssr/client hydrationReport())
+ *   window.__swcSsrDefined     true once every custom element of the page is defined (before hydrateSpectrum() runs)
+ *   window.__swcSsrRelease()   with ?hydrateDelay=hold: lets hydrateSpectrum() run
  *
  * URL options (SSR mode):
- *   ?agnostic=1   hydrate without the template: remove `defer-hydration` top-down (the framework-agnostic path)
+ *   ?agnostic=1      hydrate without the template: remove `defer-hydration` top-down (the framework-agnostic path)
+ *   ?removeStyles=1  hydrateSpectrum({removeServerStyles: true}): free the server's <style> elements after hydration
+ *   ?hydrateDelay=N  wait N ms (after the definitions loaded) before calling hydrateSpectrum(): holds the page in the
+ *                    state an application with a late bootstrap is in - elements defined, nothing hydrated yet;
+ *                    `hold` instead of N waits until the page calls window.__swcSsrRelease()
  */
 declare global {
   interface Window {
     __swcSsrMode?: 'ssr' | 'csr';
     __swcSsrHydration?: Promise<HydrationReport>;
     __swcSsrReport?: () => HydrationReport;
+    __swcSsrDefined?: boolean;
+    __swcSsrRelease?: () => void;
   }
 }
 
@@ -43,6 +51,7 @@ async function start(): Promise<HydrationReport> {
     return failureReport('#app not found');
   }
 
+  const params = new URLSearchParams(location.search);
   const names = (app.dataset.components ?? '').split(',').filter((name) => name !== '');
   const entries: CatalogEntry[] = [];
   const unknown: string[] = [];
@@ -56,6 +65,7 @@ async function start(): Promise<HydrationReport> {
   // Registers every custom element the page needs. Elements still carry `defer-hydration`, so none of them
   // hydrates before hydrateSpectrum() below says so.
   await Promise.all(entries.map((entry) => entry.load()));
+  window.__swcSsrDefined = true;
 
   if (mode === 'csr') {
     render(pageTemplate(entries), app);
@@ -63,8 +73,15 @@ async function start(): Promise<HydrationReport> {
     return hydrateSpectrum(app);
   }
 
-  const agnostic = new URLSearchParams(location.search).get('agnostic') === '1';
-  return hydrateSpectrum(app, agnostic ? {} : {template: pageTemplate(entries)});
+  const delay = params.get('hydrateDelay');
+  if (delay === 'hold') {
+    await new Promise<void>((resolve) => (window.__swcSsrRelease = resolve));
+  } else if (Number(delay) > 0) {
+    await new Promise((resolve) => setTimeout(resolve, Number(delay)));
+  }
+  const options: HydrateSpectrumOptions = {removeServerStyles: params.get('removeStyles') === '1'};
+  if (params.get('agnostic') !== '1') options.template = pageTemplate(entries);
+  return hydrateSpectrum(app, options);
 }
 
 window.__swcSsrHydration = start().catch((error: unknown) => {

@@ -3,10 +3,11 @@ import './ssr-setup.js';
 import {existsSync} from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {gzipSync} from 'node:zlib';
 import express from 'express';
 import type {NextFunction, Request, RequestHandler, Response} from 'express';
 import {renderSpectrum} from 'swc-ssr/server';
-import type {RenderReport} from 'swc-ssr/server';
+import type {RenderReport, StyleOptions} from 'swc-ssr/server';
 import {catalog, findEntry} from './catalog/index.js';
 import type {CatalogEntry} from './catalog/types.js';
 import {layoutCss, pageTemplate} from './page.js';
@@ -109,8 +110,57 @@ interface LoadFailure {
   message: string;
 }
 
-/** What /report.json returns: the RenderReport, plus the entries that could not be loaded and were left out. */
+/** What /report.json returns: the RenderReport (with `styles` in trimmed mode), plus the entries that could not be loaded and were left out. */
 type ServedReport = RenderReport & {loadErrors: LoadFailure[]};
+
+/* -------------------------------------------------------------------------------------------------------------- *
+ * ?styles= / ?refs=
+ * -------------------------------------------------------------------------------------------------------------- */
+
+/** `?styles=`: 'full' (default) is today's output, 'trimmed' the trimmed CSS, 'minified' trimmed + short custom property names. */
+type StylesMode = 'full' | 'trimmed' | 'minified';
+const STYLES_MODES: readonly StylesMode[] = ['full', 'trimmed', 'minified'];
+
+interface StylesRequest {
+  mode: StylesMode;
+  options: StyleOptions;
+}
+
+/** A request the client got wrong (answered with 400, not 500). */
+class BadRequestError extends Error {}
+
+/** `?refs=--a,--b` (also repeated): custom property names / `--prefix-*` patterns the app's own CSS uses. */
+function parseReferences(query: unknown): string[] {
+  const values = Array.isArray(query) ? query : query === undefined ? [] : [query];
+  const refs: string[] = [];
+  for (const value of values) {
+    if (typeof value !== 'string') throw new BadRequestError('?refs must be a comma separated list of custom property names');
+    for (const part of value.split(',')) {
+      const ref = part.trim();
+      if (ref === '') continue;
+      if (!/^--[A-Za-z0-9_*-]*$/.test(ref)) {
+        throw new BadRequestError(`?refs: "${ref}" is not a custom property name (--name) or prefix (--prefix-*)`);
+      }
+      refs.push(ref);
+    }
+  }
+  return refs;
+}
+
+function parseStyles(req: Request): StylesRequest {
+  const raw = req.query.styles;
+  const mode = raw === undefined || raw === '' ? 'full' : raw;
+  if (typeof mode !== 'string' || !(STYLES_MODES as readonly string[]).includes(mode)) {
+    throw new BadRequestError(`?styles must be one of ${STYLES_MODES.join(', ')}`);
+  }
+  const references = parseReferences(req.query.refs);
+  const options: StyleOptions = {mode: mode === 'full' ? 'full' : 'trimmed'};
+  if (mode === 'minified') options.minifyCustomProperties = true;
+  if (references.length > 0) options.references = references;
+  return {mode: mode as StylesMode, options};
+}
+
+const kb = (bytes: number): string => (bytes / 1024).toFixed(1);
 
 const ALL_KEY = '*';
 let lastReport: ServedReport | undefined;
@@ -147,11 +197,18 @@ interface SsrPage {
   renderMs: number;
 }
 
+interface RenderSsrOptions {
+  tolerateLoadErrors: boolean;
+  lang: string;
+  styles: StylesRequest;
+  /** Store the report as "the last report" (/report.json); /styles.json renders on demand without touching it. */
+  remember?: boolean;
+}
+
 function renderSsr(
   entries: CatalogEntry[],
   reportKey: string,
-  tolerateLoadErrors: boolean,
-  lang: string,
+  {tolerateLoadErrors, lang, styles, remember = true}: RenderSsrOptions,
 ): Promise<SsrPage> {
   return exclusive(async () => {
     const started = performance.now();
@@ -170,10 +227,12 @@ function renderSsr(
     }
     // deferHydration: nothing hydrates while the client is still loading definitions; hydrateSpectrum() then
     // enables the elements in document order (the order client-side rendering updates them in).
-    const result = await renderSpectrum(pageTemplate(loaded), {deferHydration: true, lang});
+    const result = await renderSpectrum(pageTemplate(loaded), {deferHydration: true, lang, styles: styles.options});
     const report: ServedReport = {...result.report, loadErrors};
-    lastReport = report;
-    reportsByKey.set(reportKey, report);
+    if (remember) {
+      lastReport = report;
+      reportsByKey.set(reportKey, report);
+    }
     return {html: result.html, entries: loaded, report, renderMs: performance.now() - started};
   });
 }
@@ -258,13 +317,16 @@ async function serveSsr(
   tolerateLoadErrors: boolean,
 ): Promise<void> {
   const lang = pageLanguage(req);
-  const page = await renderSsr(entries, reportKey, tolerateLoadErrors, lang);
+  const styles = parseStyles(req);
+  const page = await renderSsr(entries, reportKey, {tolerateLoadErrors, lang, styles});
+  const stylesReport = page.report.styles;
   const elementErrors = page.report.elements.reduce((sum, element) => sum + element.errors.length, 0);
   const fallbacks = page.report.elements.filter((element) => element.fallback).length;
   res.locals.renderLog =
     `render ${page.renderMs.toFixed(1)} ms (renderSpectrum ${page.report.durationMs.toFixed(1)} ms), ` +
     `${page.report.elements.length} elements, ${elementErrors} errors, ${fallbacks} fallbacks` +
     `, lang ${lang}` +
+    `, styles ${styles.mode} ${stylesReport ? `${kb(stylesReport.trimmedBytes)}/${kb(stylesReport.fullBytes)} KB` : 'n/a'}` +
     (page.report.loadErrors.length > 0 ? `, ${page.report.loadErrors.length} entries skipped` : '');
   res.set('Server-Timing', `ssr;dur=${page.renderMs.toFixed(1)}`);
   sendHtml(
@@ -337,6 +399,53 @@ app.get('/report.json', (req, res) => {
   res.set('Cache-Control', 'no-store').json(report);
 });
 
+/**
+ * Size of the CSS a render produces, without a browser: `GET /styles.json?component=<name>&styles=<mode>` renders the
+ * page on demand (the normal path; `component` omitted or `*` = the whole catalog; the "last report" of /report.json
+ * is left alone) and returns
+ *   fullBytes / trimmedBytes / sheets  from `report.styles` (what the trimmer says; both are the measured CSS size
+ *                                      when the server core reports no styles),
+ *   cssBytes                           measured: the text of every <style> element of the document,
+ *   htmlBytes / gzipBytes              the whole document as served, raw and gzipped,
+ *   reported                           whether `report.styles` was present.
+ */
+app.get(
+  '/styles.json',
+  route(async (req, res) => {
+    const name = typeof req.query.component === 'string' && req.query.component !== '' ? req.query.component : ALL_KEY;
+    const entry = name === ALL_KEY ? undefined : findEntry(name);
+    if (name !== ALL_KEY && !entry) return notFound(res, `component "${name}"`);
+    const lang = pageLanguage(req);
+    const styles = parseStyles(req);
+    const page = await renderSsr(entry ? [entry] : catalog, name, {tolerateLoadErrors: !entry, lang, styles, remember: false});
+    const document = shell({
+      title: entry ? `Spectrum SSR demo - ${entry.name}` : 'Spectrum SSR demo',
+      mode: 'ssr',
+      lang,
+      components: page.entries.map((loaded) => loaded.name),
+      body: page.html,
+      script: true,
+    });
+    let cssBytes = 0;
+    for (const match of document.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/g)) cssBytes += Buffer.byteLength(match[1] ?? '');
+    const reported = page.report.styles;
+    res.locals.renderLog = `styles ${styles.mode} ${reported ? `${kb(reported.trimmedBytes)}/${kb(reported.fullBytes)} KB` : 'n/a'}`;
+    res.set('Cache-Control', 'no-store').json({
+      component: name,
+      styles: styles.mode,
+      reported: reported !== undefined,
+      fullBytes: reported?.fullBytes ?? cssBytes,
+      trimmedBytes: reported?.trimmedBytes ?? cssBytes,
+      cssBytes,
+      htmlBytes: Buffer.byteLength(document),
+      gzipBytes: gzipSync(document).length,
+      sheets: reported?.sheets ?? [],
+      durationMs: reported?.durationMs ?? null,
+      elements: page.report.elements.length,
+    });
+  }),
+);
+
 app.get('/catalog.json', (_req, res) => {
   res.json(
     catalog.map((entry) => ({
@@ -350,6 +459,10 @@ app.get('/catalog.json', (_req, res) => {
 app.use((req, res) => notFound(res, req.path));
 
 app.use((error: unknown, req: Request, res: Response, _next: NextFunction) => {
+  if (error instanceof BadRequestError && !res.headersSent) {
+    res.status(400).type('text/plain').send(`Bad request: ${error.message}`);
+    return;
+  }
   const text = error instanceof Error ? (error.stack ?? error.message) : String(error);
   console.error(`[demo] ${req.method} ${req.originalUrl} failed:\n${text}`);
   if (res.headersSent) {

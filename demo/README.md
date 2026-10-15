@@ -19,8 +19,10 @@ Open <http://localhost:3000/>. `PORT=4000 npm run demo` changes the port.
 The server logs one line per request, including the render time, for example:
 
 ```
-[demo] GET /component/button -> 200 in 41.7 ms | render 38.2 ms (renderSpectrum 35.9 ms), 7 elements, 0 errors, 0 fallbacks, lang en-US
+[demo] GET /component/button -> 200 in 41.7 ms | render 38.2 ms (renderSpectrum 35.9 ms), 7 elements, 0 errors, 0 fallbacks, lang en-US, styles full n/a
 ```
+
+(`styles trimmed 823.6/1230.5 KB` with `?styles=trimmed`: trimmed / full CSS of the page.)
 
 ## Routes
 
@@ -31,9 +33,14 @@ The server logs one line per request, including the render time, for example:
 | `GET /csr`, `GET /csr/:name` | Same page shell, no SSR: `#app` is empty and the client renders the template with lit's `render()`. This is the reference DOM that the e2e tests compare the hydrated DOM against |
 | `?nohydrate=1` on an SSR route | Omits the client `<script>`: the pure server-rendered view (what a visitor without JavaScript, or before the bundle arrives, sees) |
 | `?agnostic=1` on an SSR route | Hydrates with the framework-agnostic path instead of the template path (see below) |
+| `?styles=full\|trimmed\|minified` on an SSR route | Server CSS: `full` (default), `trimmed` (`renderSpectrum({styles: {mode: 'trimmed'}})`), `minified` (trimmed + `minifyCustomProperties`). Anything else: 400 |
+| `?refs=--a,--b,--prefix-*` on an SSR route | `StyleOptions.references` (custom properties the page's own CSS uses). Invalid names: 400 |
+| `?removeStyles=1` on an SSR route | The client calls `hydrateSpectrum(app, {removeServerStyles: true})` |
+| `?hydrateDelay=<ms>` / `?hydrateDelay=hold` on an SSR route | The client calls `hydrateSpectrum()` that much later than the definitions loaded, or when the page calls `window.__swcSsrRelease()` (the state of an app with a late bootstrap; `window.__swcSsrDefined` is true once the definitions loaded) |
 | `?lang=<tag>` on SSR and CSR routes | Page language (e.g. `?lang=de`). Without it, the request's most preferred `Accept-Language` language, else `en`. Passed to `renderSpectrum({lang})` and written to `<html lang>`, so the client formats like the server |
 | `HEAD` on any path | 200 with an empty body, never renders (health checks / preview monitors). Logged once, then as a per-minute count |
 | `GET /report.json` | `RenderReport` of the last SSR render (per element id: tag, errors, warnings, fallback), plus `loadErrors`. `?component=<name>` (or `*` for the whole catalog) returns the last report of that page, which is race-free when pages are rendered in parallel |
+| `GET /styles.json?component=<name\|*>&styles=<mode>` | Renders the page on demand (leaves `/report.json` alone) and returns the CSS sizes: `report.styles` (`fullBytes`, `trimmedBytes`, `sheets`, `durationMs`) plus the measured `<style>` text (`cssBytes`), document and gzip sizes |
 | `GET /catalog.json` | `[{name, interactive, notes}]` for every catalog entry |
 | `GET /dist/*` | Static files from `demo/public/dist` (the client bundle and its source map) |
 

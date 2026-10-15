@@ -39,6 +39,29 @@ export function isPageRow(row: Row): boolean {
   return Object.prototype.hasOwnProperty.call(PAGES, row.component);
 }
 
+/**
+ * tests/styles.spec.ts, the whole-catalog page `/` with trimmed CSS. Its row is not a component (and not a Pages row): it
+ * feeds the totals of the "Styles" section. The styles checks of the catalog entries are recorded on the component rows.
+ */
+export const STYLES_PAGE_ROW = 'styles: /';
+
+export function isStylesPageRow(row: Row): boolean {
+  return row.component === STYLES_PAGE_ROW;
+}
+
+/** The checks of tests/styles.spec.ts (optional trimmed CSS), in the order of the Styles table. */
+const STYLE_CHECKS: CheckName[] = [
+  'styles-oracle',
+  'styles-minified',
+  'styles-states',
+  'styles-hydration',
+  'styles-restore',
+  'styles-post',
+  'styles-post-states',
+  'styles-release',
+  'styles-size',
+];
+
 /** Result rows of the phone emulation (tests/mobile.spec.ts), one per component: `mobile: <name>`. */
 const MOBILE_PREFIX = 'mobile: ';
 export const mobileRow = (name: string): string => `${MOBILE_PREFIX}${name}`;
@@ -214,11 +237,197 @@ export function isFullyGreen(row: Row): boolean {
   return !interaction || interaction.status !== 'fail';
 }
 
+const kb = (bytes: number): string => (bytes / 1024).toFixed(1);
+
+/** `full -> trimmed (minified)` in KiB, from the metrics of a `styles-size` record; `-` when it did not run. */
+function kbChain(metrics: ResultRecord['metrics'] | undefined, keys: [string, string, string]): string {
+  if (!metrics) return '-';
+  const [full, trimmed, minified] = keys.map((key) => num(metrics[key]));
+  if (full === undefined || trimmed === undefined) return '-';
+  return `${kb(full)} -> ${kb(trimmed)}${minified !== undefined ? ` (${kb(minified)})` : ''}`;
+}
+
+function cssCell(row: Row): string {
+  return kbChain(row.checks['styles-size']?.metrics, ['cssFull', 'cssTrimmed', 'cssMinified']);
+}
+
+function styleStatus(row: Row, check: CheckName, detail?: (record: ResultRecord) => string): string {
+  const rec = row.checks[check];
+  if (!rec) return '-';
+  if (rec.status === 'pass') return 'ok';
+  if (rec.status === 'skip') return 'skip';
+  return `FAIL${detail ? detail(rec) : ''}`;
+}
+
+const pixels = (record: ResultRecord): string => {
+  const n = num(record.metrics.diffPixels);
+  return n !== undefined && n > 0 ? ` (${n} px)` : '';
+};
+
+function styleFlickerCell(row: Row): string {
+  const rec = row.checks['styles-hydration'];
+  const ratio = rec ? num(rec.metrics.ratio) : undefined;
+  if (ratio === undefined) return '-';
+  const text = (ratio * 100).toFixed(3);
+  return rec?.metrics.excusedByFull === true ? `${text} (as full)` : text;
+}
+
+function shareCell(row: Row): string {
+  const share = num(row.checks['styles-size']?.metrics.share);
+  return share === undefined ? '-' : `${(share * 100).toFixed(1)} %`;
+}
+
+function styleNotesCell(row: Row): string {
+  const notes: string[] = [];
+  for (const check of STYLE_CHECKS) {
+    const rec = row.checks[check];
+    const alwaysNoted: CheckName[] = ['styles-size', 'styles-hydration', 'styles-restore', 'styles-post', 'styles-post-states', 'styles-release'];
+    if (rec?.note && (rec.status === 'fail' || alwaysNoted.includes(check))) {
+      notes.push(`${check.slice('styles-'.length)}: ${truncate(rec.note, 200)}`);
+    }
+  }
+  return notes.join('; ');
+}
+
+/** A component is green for the styles checks when it ran at least one and none failed. */
+function isStylesGreen(row: Row): boolean {
+  const ran = STYLE_CHECKS.filter((check) => row.checks[check]);
+  return ran.length > 0 && ran.every((check) => row.checks[check]!.status !== 'fail');
+}
+
+/**
+ * The "Styles" section (tests/styles.spec.ts): oracle / hydration / release outcomes per component, and the CSS
+ * totals: the sums over the catalog entries' own pages, and the whole-catalog page `/` (full vs trimmed vs minified).
+ * Empty when the styles spec did not run.
+ */
+function stylesSection(rows: Row[], pageRow: Row | undefined): string[] {
+  const styleRows = rows.filter((row) => STYLE_CHECKS.some((check) => row.checks[check]));
+  if (styleRows.length === 0 && !pageRow) return [];
+  const lines: string[] = [];
+  const green = styleRows.filter(isStylesGreen).length;
+  lines.push('## Styles (optional trimmed CSS, tests/styles.spec.ts)');
+  lines.push('');
+  lines.push(
+    `- **${green}/${styleRows.length} components green**${pageRow ? `; page \`/\`: ${STYLE_CHECKS.every((check) => pageRow.checks[check]?.status !== 'fail') ? 'green' : 'FAIL'}` : ''}`,
+  );
+  lines.push(
+    '- Oracle = no JavaScript, same viewport and clip, `?styles=trimmed` (`minified`) vs `?styles=full`: 0 differing pixels ' +
+      '(pixelmatch threshold 0, anti-aliased pixels counted). States = hover, then focus, of the first interactive control. ' +
+      'Hydration / Flicker % = `?styles=trimmed` (`minified`) hydrates cleanly and its pure-SSR paint equals the hydrated paint (`as full`: over the ' +
+      'threshold with the full CSS too). Restore = the hydrated trimmed / minified page against the hydrated full-CSS page, 0 differing pixels, in three ' +
+      'moments: after every element is defined but none hydrated (`<sp-theme>` has already replaced its server styles), after hydration, and after ' +
+      'setting states the server did not render (selected, quiet, invalid, checked, disabled, ...) on every sp-* element; afterwards no marked server ' +
+      '`<style>` is left. Post = the same at normal timing (`hydrateSpectrum()` right after the definitions): the hydrated trimmed / minified page ' +
+      'equals the hydrated full-CSS page (0 px), no `<style data-swc-styles>` is left in any shadow root, and every hydrated sp-* Lit element runs on ' +
+      'adopted sheets. Post states = then hover, focus and click the first control, set `disabled` on it, `size="xl"` on the first button, toggle ' +
+      '`quiet`, select the first menu item / tab, set `invalid` on the first text field: every step equals the full-CSS page (0 px). ' +
+      'Release = `removeServerStyles`: no `<style>` left in the sp-* shadow roots, and the hydrated paint equals the full-CSS page.',
+  );
+  lines.push('- Sizes are the text of the `<style>` elements of the served page (KiB); gzip is of the whole html document.');
+  lines.push('');
+
+  // Totals over the entries' pages.
+  const sized = styleRows.map((row) => row.checks['styles-size']?.metrics).filter((m): m is NonNullable<typeof m> => m !== undefined);
+  const sum = (key: string): number => sized.reduce((total, m) => total + (num(m[key]) ?? 0), 0);
+  const withSizes = sized.filter((m) => num(m.cssFull) !== undefined);
+  if (withSizes.length > 0) {
+    lines.push(`Totals over the ${withSizes.length} catalog entries' own pages (each rendered alone):`);
+    lines.push('');
+    lines.push('| | full | trimmed | minified |');
+    lines.push('|---|---|---|---|');
+    lines.push(`| CSS KiB | ${kb(sum('cssFull'))} | ${kb(sum('cssTrimmed'))} | ${kb(sum('cssMinified'))} |`);
+    lines.push(`| html KiB | ${kb(sum('htmlFull'))} | ${kb(sum('htmlTrimmed'))} | ${kb(sum('htmlMinified'))} |`);
+    lines.push(`| gzip KiB | ${kb(sum('gzipFull'))} | ${kb(sum('gzipTrimmed'))} | ${kb(sum('gzipMinified'))} |`);
+    lines.push('');
+  }
+
+  // The whole-catalog page.
+  const page = pageRow?.checks['styles-size']?.metrics;
+  if (page && num(page.cssFull) !== undefined) {
+    const modes = [
+      ['full', 'Full'],
+      ['trimmed', 'Trimmed'],
+      ['minified', 'Minified'],
+    ] as const;
+    const pageValue = (suffix: string, mode: string): number | undefined => num(page[`${suffix}${mode}`]);
+    lines.push('Whole-catalog page `/`:');
+    lines.push('');
+    lines.push('| Mode | html KiB | CSS KiB | CSS share of html | CSS vs full | gzip KiB | gzip vs full |');
+    lines.push('|---|---|---|---|---|---|---|');
+    for (const [mode, suffix] of modes) {
+      const html = pageValue('html', suffix);
+      const css = pageValue('css', suffix);
+      const gzip = pageValue('gzip', suffix);
+      const cssFull = pageValue('css', 'Full');
+      const gzipFull = pageValue('gzip', 'Full');
+      lines.push(
+        '| ' +
+          [
+            mode,
+            html !== undefined ? kb(html) : '-',
+            css !== undefined ? kb(css) : '-',
+            html && css !== undefined ? `${((css / html) * 100).toFixed(1)} %` : '-',
+            css !== undefined && cssFull ? `${((css / cssFull) * 100).toFixed(1)} %` : '-',
+            gzip !== undefined ? kb(gzip) : '-',
+            gzip !== undefined && gzipFull ? `${((gzip / gzipFull) * 100).toFixed(1)} %` : '-',
+          ].join(' | ') +
+          ' |',
+      );
+    }
+    lines.push('');
+  }
+  if (pageRow) {
+    const checks = STYLE_CHECKS.filter((check) => check !== 'styles-states' && check !== 'styles-post-states')
+      .map((check) => {
+        const rec = pageRow.checks[check];
+        const name = check.slice('styles-'.length);
+        return `${name} ${rec ? (rec.status === 'pass' ? 'ok' : rec.status === 'skip' ? 'skip' : `FAIL${pixels(rec)}`) : '-'}`;
+      })
+      .join(', ');
+    lines.push(`Page \`/\` checks: ${checks}`);
+    const notes = styleNotesCell(pageRow);
+    if (notes) lines.push(`Page \`/\` notes: ${notes}`);
+    lines.push('');
+  }
+
+  lines.push(
+    '| Component | Oracle | Minified | States | Hydration | Flicker % | Restore | Post | Post states | Release | CSS KiB full -> trimmed (minified) | Trimmed share | gzip KiB full -> trimmed (minified) | Notes |',
+  );
+  lines.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
+  for (const row of styleRows) {
+    lines.push(
+      '| ' +
+        [
+          row.component,
+          styleStatus(row, 'styles-oracle', pixels),
+          styleStatus(row, 'styles-minified', pixels),
+          styleStatus(row, 'styles-states'),
+          styleStatus(row, 'styles-hydration'),
+          styleFlickerCell(row),
+          styleStatus(row, 'styles-restore', pixels),
+          styleStatus(row, 'styles-post', pixels),
+          styleStatus(row, 'styles-post-states', pixels),
+          styleStatus(row, 'styles-release', pixels),
+          cssCell(row),
+          shareCell(row),
+          kbChain(row.checks['styles-size']?.metrics, ['gzipFull', 'gzipTrimmed', 'gzipMinified']),
+          styleNotesCell(row),
+        ]
+          .map(cell)
+          .join(' | ') +
+        ' |',
+    );
+  }
+  lines.push('');
+  return lines;
+}
+
 export function buildSummary(records: ResultRecord[], now: Date = new Date()): string {
   const allRows = groupByComponent(records);
   const pageRows = allRows.filter(isPageRow);
   const mobileRows = allRows.filter(isMobileRow);
-  const rows = allRows.filter((row) => !isPageRow(row) && !isMobileRow(row));
+  const stylesPageRow = allRows.find(isStylesPageRow);
+  const rows = allRows.filter((row) => !isPageRow(row) && !isMobileRow(row) && !isStylesPageRow(row));
   const green = rows.filter(isFullyGreen).length;
 
   const count = (check: CheckName): {ok: number; total: number} => {
@@ -247,8 +456,8 @@ export function buildSummary(records: ResultRecord[], now: Date = new Date()): s
   lines.push('- Legend: `ok` passed, `FAIL` failed, `-` not run / not applicable. Flicker % = differing pixels between the ' +
     'pure-SSR paint and the hydrated paint; the number in `ok (n)` is the count of hydrated custom elements (sp-* and others, e.g. overlay-trigger).');
   lines.push('');
-  lines.push('| Component | SSR | Hydration | Flicker % | CLS | Fidelity | Interaction | Notes |');
-  lines.push('|---|---|---|---|---|---|---|---|');
+  lines.push('| Component | SSR | Hydration | Flicker % | CLS | Fidelity | Interaction | CSS KB full -> trimmed (minified) | Notes |');
+  lines.push('|---|---|---|---|---|---|---|---|---|');
   for (const row of rows) {
     lines.push(
       '| ' +
@@ -260,6 +469,7 @@ export function buildSummary(records: ResultRecord[], now: Date = new Date()): s
           clsCell(row),
           fidelityCell(row),
           interactionCell(row),
+          cssCell(row),
           notesCell(row),
         ]
           .map(cell)
@@ -267,8 +477,9 @@ export function buildSummary(records: ResultRecord[], now: Date = new Date()): s
         ' |',
     );
   }
-  if (rows.length === 0) lines.push('| _no results recorded_ | | | | | | | |');
+  if (rows.length === 0) lines.push('| _no results recorded_ | | | | | | | | |');
   lines.push('');
+  lines.push(...stylesSection(rows, stylesPageRow));
   if (pageRows.length > 0) {
     lines.push('## Pages');
     lines.push('');

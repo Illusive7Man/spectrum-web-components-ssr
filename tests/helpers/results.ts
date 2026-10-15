@@ -16,8 +16,33 @@ export const FIDELITY_DIR = path.join(RESULTS_DIR, 'fidelity');
 export const RAW_FILE = path.join(RESULTS_DIR, 'raw.jsonl');
 export const SUMMARY_FILE = path.join(RESULTS_DIR, 'summary.md');
 
-/** `csr` is only recorded for whole pages (tests/all-components.spec.ts): the client-rendered reference page. */
-export type CheckName = 'ssr' | 'ssr-errors' | 'nojs' | 'hydration' | 'flicker' | 'fidelity' | 'interaction' | 'csr';
+/**
+ * `csr` is only recorded for whole pages (tests/all-components.spec.ts): the client-rendered reference page.
+ * The `styles-*` checks belong to tests/styles.spec.ts (optional trimmed CSS, docs/API.md "Styles"): `styles-oracle` /
+ * `styles-minified` trimmed / minified CSS renders pixel-identically to the full CSS, `styles-states` the same for
+ * hover and focus, `styles-hydration` hydration (and flicker) of a trimmed page, `styles-restore` the held (late)
+ * hydration against the full CSS, `styles-post` the hydrated trimmed / minified page against the hydrated full-CSS page
+ * (normal timing), `styles-post-states` the same after hover / focus / click and DOM changes made after hydration,
+ * `styles-release` the client's `removeServerStyles`, `styles-size` the CSS bytes.
+ */
+export type CheckName =
+  | 'ssr'
+  | 'ssr-errors'
+  | 'nojs'
+  | 'hydration'
+  | 'flicker'
+  | 'fidelity'
+  | 'interaction'
+  | 'csr'
+  | 'styles-oracle'
+  | 'styles-minified'
+  | 'styles-states'
+  | 'styles-hydration'
+  | 'styles-restore'
+  | 'styles-post'
+  | 'styles-post-states'
+  | 'styles-release'
+  | 'styles-size';
 export type CheckStatus = 'pass' | 'fail' | 'skip';
 export type MetricValue = string | number | boolean | null;
 export type Metrics = Record<string, MetricValue>;

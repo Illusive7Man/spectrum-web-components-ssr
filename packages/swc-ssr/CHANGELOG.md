@@ -4,6 +4,52 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 Until 1.0.0 a minor version may contain breaking changes.
 
+## [0.2.0] - unreleased
+
+Optional trimming of the server CSS, and the hydration semantics it needs (details: `docs/API.md` "Styles",
+`docs/DESIGN.md` "Style trimming").
+
+### Added
+
+- `RenderSpectrumOptions.styles` (`StyleOptions`): `mode: 'trimmed'` keeps, per stylesheet, the rules whose selectors
+  can match the rendered DOM of its instances on the page (state and unknown pseudo-classes count as matching) plus the
+  at-rules they need; `trimTheme` (default true) prunes theme custom properties nothing on the page uses (transitively
+  through `var()` chains); `references` keeps the names the application's own CSS uses; `undefinedPrefixes` collapses
+  `var(--prefix-x, V)` to `V`; `minifyCustomProperties` renames the remaining custom properties to short names; `keep`
+  forces rules. Default `mode: 'full'`: the output is byte-identical to 0.1.x. Measured: button page 1.22 MB -> 0.83 MB
+  (0.31 MB minified), whole catalog 18.66 MB -> 13.31 MB (6.55 MB minified); trimming takes 9-23 ms per one-component
+  page and about half a second on the 59-component catalog.
+- `RenderReport.styles` (`StylesReport`, trimmed mode): every stylesheet with its instances, full and trimmed sizes, and
+  the time spent trimming.
+- `scanCustomPropertyReferences(text)`: every `var(--x)` name of a CSS or JavaScript text, for `references`.
+- `STYLE_MARKER_ATTRIBUTE` (`data-swc-styles`) and `StyleMarker`: every `<style>` the trimmer changed carries
+  `data-swc-styles="trimmed"` or `"minified"`.
+- `HydrateSpectrumOptions.removeServerStyles` (default false): frees the complete server `<style>` elements of `full`
+  pages once the elements adopted their stylesheets.
+- Demo: `?styles=full|trimmed|minified` and `?refs=` on every SSR route, `report.styles` in `/report.json`,
+  `GET /styles.json`, client options `?removeStyles=1` and `?hydrateDelay=<ms>|hold`.
+- Tests: `tests/styles.spec.ts`, a pixel-exact oracle (threshold 0) of trimmed and minified CSS against full CSS for
+  every catalog entry and the whole-catalog page: without JavaScript, hover / focus, flicker, late hydration,
+  post-hydration, state changes after hydration, `removeServerStyles`, sizes; a "Styles" section in
+  `tests/results/summary.md`.
+
+### Fixed
+
+- Hydrated pages no longer lose their styling with trimmed / minified server CSS (reported: "hydration broke / ignored
+  all styling"). Lit's hydration support keeps a hydrated element's server `<style>` as its only stylesheet, and
+  `<sp-theme>` replaces its server `<style>` with the complete theme when it upgrades, so minified components lost
+  every theme value and trimmed components had no rules for later states. `swc-ssr/client` now gives every hydrated
+  element its class's complete `elementStyles` (shared constructable sheets) in the same task as its hydrating update,
+  and keeps the server's `<sp-theme>` `<style>` until the last marked `<style>` is gone.
+- `hydrateSpectrum()` called more than a frame after the definitions loaded no longer waits out its timeouts on pages
+  with menus: a hydration adapter breaks the `Menu.updateCache()` / `getUpdateComplete()` cycle of `sp-menu`,
+  `sp-picker`, `sp-action-menu` and `sp-combobox` (whole catalog hydrated late: about 0.6 s instead of 6 s and a
+  `did not settle` warning).
+
+### Changed
+
+- New runtime dependency `css-what` (the selector parser `css-select` already uses).
+
 ## [0.1.2] - unreleased
 
 Fixes of a third review (details: `docs/DESIGN.md`, "Hardening" / "Third review").

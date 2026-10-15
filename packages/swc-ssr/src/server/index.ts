@@ -18,9 +18,14 @@ export {ThemeRenderer} from './theme-renderer.js';
 export {registerAdapter} from './adapters/index.js';
 export {getCurrentRenderContext} from './context.js';
 export {ServerTree} from './server-tree.js';
+export {scanCustomPropertyReferences} from './styles/css-text.js';
+export {STYLE_MARKER_ATTRIBUTE} from './styles/collector.js';
+export type {StyleMarker} from './styles/collector.js';
 export type {
   LifecycleMode,
   RenderSpectrumOptions,
+  StyleOptions,
+  StylesReport,
   ElementReport,
   RenderReport,
   RenderSpectrumResult,

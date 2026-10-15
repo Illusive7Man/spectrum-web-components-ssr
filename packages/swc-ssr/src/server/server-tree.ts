@@ -100,6 +100,17 @@ export class ServerTree {
     return html?.attribs.lang?.trim() || undefined;
   }
 
+  /** Text content of a `<style>` element of this tree (CSS that was swapped for a placeholder while parsing restored). */
+  styleText(element: Element): string {
+    let text = '';
+    for (const child of element.children) {
+      if (isTextNode(child)) {
+        text += child.data;
+      }
+    }
+    return this.restoreStyles(text);
+  }
+
   private restoreStyles(text: string): string {
     return text.includes(STYLE_PLACEHOLDER)
       ? text.replace(STYLE_PLACEHOLDER_RE, (match, index: string) => this.styles[Number(index)] ?? match)

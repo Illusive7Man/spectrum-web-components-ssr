@@ -42,6 +42,7 @@ import {
 } from './plan.js';
 import {resolveRenderOptions} from './render-options.js';
 import {MARKER_ATTRIBUTE} from './server-tree.js';
+import {styleCollectorOf} from './styles/collector.js';
 import type {AdapterContext} from './types.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -326,9 +327,16 @@ export class SpectrumElementRenderer extends LitElementRenderer {
     const result: ThunkedRenderResult = [];
     const styles = element.constructor?.elementStyles as Array<{cssText: string}> | undefined;
     if (styles !== undefined && styles.length > 0) {
+      // `styles: {mode: 'trimmed'}`: placeholders, resolved after the final pass (styles/trim.ts).
+      const collector = styleCollectorOf(plan?.context.session);
       result.push('<style>');
-      for (const style of styles) {
-        result.push(style.cssText);
+      if (collector) {
+        const tag = this.tagName;
+        styles.forEach((style, index) => result.push(collector.placeholder(tag, style, () => `${tag}:${index}`)));
+      } else {
+        for (const style of styles) {
+          result.push(style.cssText);
+        }
       }
       result.push('</style>');
     }

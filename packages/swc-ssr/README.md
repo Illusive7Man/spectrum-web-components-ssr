@@ -81,6 +81,53 @@ element registry are process-wide.
 | `lazyDefinitionWaitMs` | `250` | how long to wait for definitions that components import lazily (`sp-slider` imports `sp-number-field` in `render()`), once per tag and process: tags still undefined when the wait ends are never waited for again. Never beyond `timeoutMs`. `0` disables the wait; `Infinity` waits up to the render's deadline (when it passes, that render returns its first-pass output with a warning; a client-only element that is never defined on the server costs this once per process). Without a deadline (`timeoutMs: 0`), `Infinity` means the default 250 ms. |
 | `deterministicIds` | `true` | Spectrum's `randomID()` ids are deterministic per render. `false` uses the CSPRNG for this render. Note: every plain `Uint8Array(4)` `getRandomValues` request made synchronously during a render gets deterministic bytes (the shape of `randomID()`'s request), also from your own template code; never use such bytes for secrets there, or turn this off. |
 | `debug` | `false` | keep the `data-swc-ssr` markers and log details. |
+| `styles` | `{mode: 'full'}` | the CSS of the declarative shadow roots. `{mode: 'trimmed'}` keeps only what the rendered page can use; see [Smaller pages](#smaller-pages-trimmed-css). Trimmed pages require `swc-ssr/client`. |
+
+### Smaller pages: trimmed CSS
+
+In the default `full` mode every shadow root carries its element's complete stylesheets: about 95 % of the HTML of a
+Spectrum page is CSS. `styles: {mode: 'trimmed'}` keeps, per stylesheet, the rules whose selectors can match the
+rendered DOM of that stylesheet's instances on this page (`:hover`, `:focus-visible`, `:checked` and other state
+pseudo-classes count as matching), the at-rules they need, and only the theme custom properties that something on the
+page uses, transitively.
+
+```ts
+import {renderSpectrum, scanCustomPropertyReferences} from 'swc-ssr/server';
+
+const {html: markup, report} = await renderSpectrum(page(), {
+  deferHydration: true,
+  lang: 'en',
+  styles: {
+    mode: 'trimmed',
+    references: scanCustomPropertyReferences(appCss), // theme variables your own CSS reads ('--spectrum-*' works too)
+    minifyCustomProperties: true,                     // optional: short custom-property names
+  },
+});
+console.log(report.styles); // {mode, sheets: [{id, tag, instances, fullBytes, trimmedBytes}], fullBytes, trimmedBytes, durationMs}
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `mode` | `'full'` | `'trimmed'` turns trimming on. |
+| `trimTheme` | `true` | prune the theme's custom-property declarations nothing on the page uses. |
+| `references` | none | custom-property names (or `--prefix-*`) your own CSS uses: kept with their dependencies, never renamed. |
+| `undefinedPrefixes` | `[]` | prefixes your app never defines, e.g. `['--mod-']`: `var(--mod-x, V)` becomes `V`. |
+| `minifyCustomProperties` | `false` | rename the remaining custom properties to `--a`, `--b`, ... (unsafe when your app sets or reads `--spectrum-*` / `--system-*` itself without listing them in `references`). |
+| `keep` | none | selectors (substring or RegExp) whose rules are always kept. |
+
+Measured: button page 1.22 MB -> 0.83 MB trimmed -> 0.31 MB minified (gzip 120 -> 79 -> 13 KB); picker 1.32 -> 0.52 ->
+0.28 MB; the whole 59-component catalog 18.66 -> 13.31 -> 6.55 MB. Trimming takes 9-23 ms on a one-component page and
+about half a second on the catalog. Every `<style>` the trimmer changed carries `data-swc-styles="trimmed"` /
+`"minified"` (`STYLE_MARKER_ATTRIBUTE`).
+
+**Trimmed pages require `swc-ssr/client`.** Lit's hydration support keeps a hydrated element's server `<style>` as its
+only stylesheet (it adopts nothing for a declarative shadow root), and `<sp-theme>` drops its server `<style>` and adopts
+the complete theme when it upgrades. Without the client a trimmed page breaks on the first state change after hydration
+(the rules were trimmed away), and a minified page loses its theme values as soon as `<sp-theme>` upgrades.
+`swc-ssr/client` gives every hydrated element its class's complete stylesheets back in the same task as its hydrating
+update, on both the template and the agnostic path, and keeps the server's theme `<style>` until the last element is
+restored. What else trimming can break (application CSS that reads theme variables, state changes before hydration,
+minification and app-defined `--spectrum-*` overrides): see docs/API.md "Styles" in the repository.
 
 ### Adapters
 
@@ -132,9 +179,15 @@ Two ways to hydrate, chosen by the `template` option:
   included. Tags that never get defined, such as an Angular component host `<app-root>`, are not awaited.
 
 `registerHydrationAdapter({tag, beforeHydrate, afterHydrate, slotchangePlan})` is the client twin of the server adapters:
-code around an element's first ("hydrating") update. Built in: `sp-picker`, `sp-slider`, `sp-breadcrumbs`, `sp-checkbox`
-and a `matchMedia` adapter for every hydrating element that has `MatchMediaController`s (`sp-picker`, `sp-action-menu`,
-`sp-contextual-help`, subclasses of them under other tags, your own components).
+code around an element's first ("hydrating") update. Built in: `sp-picker`, `sp-slider`, `sp-breadcrumbs`, `sp-checkbox`,
+a `matchMedia` adapter for every hydrating element that has `MatchMediaController`s (`sp-picker`, `sp-action-menu`,
+`sp-contextual-help`, subclasses of them under other tags, your own components), and a `Menu` adapter that lets menus
+hydrated long after their definitions loaded finish updating (so `hydrateSpectrum()` may run late, e.g. after an
+Angular bootstrap).
+
+`hydrateSpectrum(root, {removeServerStyles: true})` frees the `<style>` elements of the server-rendered shadow roots once
+the elements have adopted the same CSS as constructable stylesheets (one shared sheet per component class instead of one
+copy per instance). Trimmed server CSS is replaced either way (see [Smaller pages](#smaller-pages-trimmed-css)).
 
 Server output rendered with `deferHydration: true` hydrates its light-DOM elements in document order, which is the order a
 client-side render creates them in. Bundling: the e2e suite bundles the client with esbuild and the production conditions

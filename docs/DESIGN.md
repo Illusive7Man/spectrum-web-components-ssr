@@ -146,6 +146,8 @@ Lit into browser mode - check `lit`'s `node` export conditions).
   in document order after the relevant definitions are loaded (await `customElements.whenDefined` per tag present), so
   nested Spectrum elements enable in parent-first order.
 * Provide a `hydrationReport()` that collects hydration-time console errors and `defer-hydration` leftovers (for the tests).
+* Server styles (0.2.0, see "Style trimming"): a hydrated element whose server `<style>` was trimmed adopts its class's
+  complete `elementStyles` in its hydrating update, and the server's `<sp-theme>` `<style>` is bridged until then.
 
 ### Demo (`demo/`)
 
@@ -482,6 +484,142 @@ passes now (122 unit tests). Full catalog: HTML and reports identical to 0.1.1 (
   pass 2 on) and restored.
 * Module-level instance counters in Spectrum ids (`sp-dialog-label-N`) make the output of the first and later renders
   of one process differ slightly; fidelity tests normalize them.
+
+## Style trimming (0.2.0)
+
+Why: in `full` mode every declarative shadow root carries its element's complete stylesheets, about 95 % of a page's
+HTML (button page 1.22 MB, 98.3 % CSS, 33 `<style>` blocks with 6 distinct texts; whole catalog 18.66 MB, 94.9 % CSS,
+1346 blocks / 87 distinct). The theme alone is 312 KB (core + spectrum + light + medium, 3377 custom-property
+declarations), of which a button-only page references about 204 properties. The idea comes from the user's
+post-build tool in SluzbeniList (`AngularApp/unused-css-builder/src/my-builder.ts`: collect `var()` references,
+compute transitive custom-property dependencies, delete unreferenced declarations, collapse `var(--undefined, V)`,
+rename to short names); here it runs per rendered page, with the rendered tree as the source of truth. Contract:
+docs/API.md "Styles". Code: `packages/swc-ssr/src/server/styles/`, `packages/swc-ssr/src/client/server-styles.ts`.
+
+### Server
+
+1. **Emission placeholders** (`styles/collector.ts`). With `styles: {mode: 'trimmed'}` the renderers
+   (`SpectrumElementRenderer.renderShadow`, `ThemeRenderer.renderShadow`) write a token `\u0001swc-css:<n>\u0001` per
+   stylesheet instead of its `cssText`. A token stands for (element tag, stylesheet object) - one entry of the class's
+   `elementStyles`, or one theme fragment - so all instances of a class share one trimmed text and the browser's
+   sharing of identical `<style>` texts keeps working. The registry belongs to the render session (the previous
+   pass's markup, reused as fallback shadow content, carries the same tokens). `full` mode emits the `cssText` as
+   before, byte for byte. Tokens keep the final HTML small, so parsing it once more is cheap.
+2. **Resolution** (`styles/trim.ts` `resolveStyles`, called from `render-spectrum.ts` after the final pass and the
+   end-of-render event-loop turn). The final HTML is parsed into a `ServerTree` (parse5 + htmlparser2 adapter; the CSS
+   of other `<style>` elements is swapped for placeholders while parsing and restored by `ServerTree.styleText`). Every
+   `<style>` holding tokens is attributed to the host of its declarative shadow root (`Instance`); a token without a
+   host (inside a plain `<template>`) keeps its stylesheet complete. `style` attributes and other CSS of the output are
+   collected as "seen by the page".
+3. **Parsing** (`styles/css-text.ts`): a small slice-preserving structural parser (no css-tree / postcss): style rules,
+   conditional group rules (`@media`, `@supports`, `@container`, `@layer` blocks, `@starting-style`) with nested
+   rules, `@keyframes`, everything else opaque; strings, comments, `url()`, escapes and native nesting (the theme's
+   `:host{...;&:lang(ar){...}}`) are handled. Kept rules are copied verbatim; only rewritten blocks are re-joined.
+   Parsed sheets and compiled selectors are cached process-wide per stylesheet object (`WeakMap`).
+4. **Selector evaluation** (`styles/selector-match.ts`): selectors parsed with `css-what`, compound selectors evaluated
+   with `css-select` over the server tree, the shadow-DOM parts by a small right-to-left matcher: `:host` /
+   `:host(<compound>)` against the host (featureless otherwise), `:host-context()` against the shadow-including
+   ancestors (a fragment render may match unknown ancestors), `::slotted()` against the flattened assigned elements
+   (forwarded `<slot>`s resolved through the outer host), combinators climbing from the shadow content to the host.
+   Structural pseudo-classes are evaluated; every other pseudo-class (states, `:dir()`, `:lang()`, `:empty`,
+   `:defined`, unknown) counts as matching; `:not()` with a non-evaluable argument, `:is()` / `:where()` / `:has()` are
+   weakened; anything unparsable keeps its rule. The rule: a rule is dropped only when none of its selectors can match
+   in any instance. Instances with equal fingerprints (host attributes and siblings, shadow content, light children)
+   are evaluated once, except for sheets with `:host-context()` or `:has()`. css-select lowercases names in HTML mode
+   while parse5 keeps SVG names camelCased, so the adapter compares names case-insensitively
+   (`::slotted(svg[viewBox])` of `illustrated-message`).
+5. **Theme closure** (`trimTheme`): the theme's custom-property declarations are kept when used transitively (through
+   the theme's own definitions, `var()` fallbacks included) by a kept component rule, a non-custom-property
+   declaration / nested rule / at-rule body of the trimmed sheets, a `style` attribute, other CSS of the output, or
+   `references`. The theme's rules other than `:host` are selector-filtered like any sheet (they cannot match a shadow
+   root that only holds a `<slot>`). The components' own custom-property declarations are not pruned: one trimmed text
+   per class and the contract's rule-level granularity keep them.
+6. **`undefinedPrefixes`** collapse `var(--prefix-x, V)` to `V` in kept rules when nothing on the page defines
+   `--prefix-x`. **`minifyCustomProperties`** renames the names the trimmed sheets define, most used first, to
+   `--a`.. (skipping every name on the page and every `references` name or prefix; never renaming `references`,
+   names in `style` attributes or uncontrolled CSS, or names that are only read).
+7. **Assembly and markers.** `@keyframes` are kept when a kept rule or other CSS names them; groups when a rule inside
+   is kept (named `@layer` blocks always). A sheet nothing was taken from is emitted as its original text (so it is
+   byte-identical and unmarked). Every token is replaced by its sheet's text; a `<style>` whose text changed gets
+   `data-swc-styles="trimmed"` / `"minified"`. `report.styles` lists every sheet with its instances and sizes. A
+   failure in any step falls back to the complete stylesheets with a `#render` warning.
+
+Measured (`.probe/css-stats.ts`, docs/API.md "Styles" has the table): button page CSS 1230 -> 823 KB trimmed / 298 KB
+minified (gzip 120 -> 79 / 13 KB), picker 1294 -> 475 / 231 KB, whole catalog 18121 -> 12616 KB (69.6 %) / 5689 KB
+(31.4 %), 4329 KB (23.9 %) with `undefinedPrefixes: ['--mod-']`. Trimming costs 9-23 ms on one-component pages and
+about 0.2-0.6 s on the whole catalog (up to 1.4 s on a loaded machine), which is less than the variance of the
+catalog render itself. Heap stays flat (`.probe/leak.ts` STYLES=trimmed N=8: 102-103 MB from render 2). Two early
+targets are not reachable under the contract (one trimmed text per element class, rule granularity for component
+sheets): the catalog's trimmed CSS stays at 69.6 % of full (the catalog renders nearly every variant of every
+component, and the remaining bulk is the components' own custom-property declarations), and the button page's
+`sp-button` sheets keep 36.6 of 41 KB trimmed (12.9 KB minified).
+
+### Hydration semantics (the user's report: "hydration broke / ignored all styling")
+
+Measured in a browser on the button page before the client fix: full and trimmed mode showed 0 differing pixels
+before vs after hydration, minified mode 85,664 (`.probe/hydration-styles.ts`): the button background became
+transparent and its height went from 32 to 22.8 px. After hydration `<sp-theme>` had 3 adopted sheets and no `<style>`
+(Theme.js `attachShadow()` clears the declarative shadow root, `adoptStyles()` adopts its complete fragments), while
+`sp-button` had 0 adopted sheets and 1 `<style>`: `@lit-labs/ssr-client/lit-element-hydrate-support.js`'s
+`createRenderRoot()` returns the existing shadow root and never calls `adoptStyles()`, so a hydrated element keeps the
+server `<style>` as its only stylesheet. Consequences: (1) minified components read renamed properties that stop
+existing the moment the theme upgrades - the page loses its styling; (2) trimmed components paint right at first, but
+any later state (an app toggling `disabled`, a variant, `selected`, an overlay opening) hits rules the trimmer
+removed. Neither is visible to a pre-hydration oracle.
+
+Fix (`client/server-styles.ts`, called from the hydration hooks in `hooks.ts` and from `index.ts`):
+
+* **Restoration.** In each element's hydrating update, right after `update()` (same task, nothing paints in between):
+  when its server `<style>` carries `data-swc-styles` (or, unmarked, differs from the class's `elementStyles` text),
+  the element adopts the class's complete `elementStyles` - one shared `CSSStyleSheet` per `CSSResult` through the
+  `CSSResult.styleSheet` getter, exactly what `createRenderRoot()` adopts on the client - and the server `<style>`s are
+  removed. On a page with any marked `<style>`, every hydrated Lit element does this (also the ones whose sheets came
+  out complete), so after hydration the page runs on adopted complete sheets throughout. Unconditional, independent of
+  `removeServerStyles`, which keeps its meaning for `full` pages. Mismatch recovery keeps the server `<style>`s and
+  restores afterwards. Browsers without constructable stylesheets get the complete text in the first server `<style>`.
+* **Theme bridge.** At import of `swc-ssr/client` (before any definition), every `<sp-theme>` (light DOM or open
+  shadow roots) whose declarative shadow root holds a marked `<style>` is recorded, with a count of the other marked
+  `<style>`s. In the `whenDefined('sp-theme')` microtask - the same task as the upgrade, so before any paint - the
+  recorded `<style>` elements are put back into the themes' shadow roots. They are removed when the count of marked
+  `<style>`s reaches 0 and a scan of the document confirms it, or at the end of `hydrateSpectrum()` when none is left;
+  otherwise they stay (late or lazy hydration, elements that never get defined). A `<style>` element instead of an
+  adopted `CSSStyleSheet` (the first design): `Theme.adoptStyles()` re-assigns `adoptedStyleSheets` whenever a theme
+  fragment is registered, which would drop an adopted bridge; a `<style>` in the shadow root comes before the adopted
+  sheets in the cascade, so the complete theme still wins wherever both define a name.
+* **Late hydration.** Testing the held state uncovered an unrelated hang: hydrating more than a frame after the
+  definitions loaded, every `sp-menu` / `sp-menu-group` (and so `sp-picker`, `sp-action-menu`, `sp-combobox`) never
+  finished updating - `Menu.updateCache()` (started by `sp-menu-item-added-or-updated` events reaching the deferred
+  menu) waits for `updateComplete`, and `getUpdateComplete()` waits for `cacheUpdated`, that same call. A shape-based
+  hydration adapter (`hooks.ts`, tag `/^/`) gives such a menu a `cacheUpdated` that settles with the next frame at the
+  end of its hydrating update; the whole catalog hydrated late now settles in about 0.6 s instead of running into the
+  3 s timeouts twice.
+
+### Oracles (tests/styles.spec.ts)
+
+Every comparison is pixel-exact: pixelmatch threshold 0 with anti-aliased pixels counted, plus a byte comparison of the
+decoded images, same viewport, same document-coordinate clip. A capture that differs is repeated with fresh page loads
+(up to 3 attempts) and only fails when no capture of the one page equals a capture of the other - a real CSS
+difference is in every capture; load-to-load raster noise (a few anti-aliased pixels in about 1 of 30 loads of
+`action-menu`, the server's very first render of a page) is not. Hydrated pages are repainted once (`forceRepaint`)
+before they are captured: a page that swapped its style sources repaints regions whose computed values did not change,
+and Chrome then rasterizes some anti-aliased edges one colour level differently from the first paint (probed: 8 px of
+`field-label`, deterministic, gone after any later repaint; computed styles and layout identical). Per catalog entry
+and for `/`:
+
+| Check | What |
+|---|---|
+| `oracle`, `oracle:minified` | no JavaScript: trimmed / minified page equals the full page |
+| `oracle:states` | no JavaScript, interactive entries: hover, then focus, of the first control |
+| `hydration:trimmed` | trimmed and minified pages hydrate without errors / deferred elements; pure-SSR paint vs hydrated paint under the flicker threshold (or no worse than full CSS) |
+| `hydration:restore` | `?hydrateDelay=hold`: interim (every element defined, `<sp-theme>` upgraded, nothing hydrated), hydrated, and four groups of states set on every sp-* element; trimmed and minified equal the full page; no marked `<style>` left; late hydration settles |
+| `post-hydration` | normal timing: after `window.__swcSsrHydration` the trimmed and minified pages equal the hydrated full page; no `<style data-swc-styles>` in any shadow root; every hydrated sp-* Lit element has adopted sheets |
+| `post-hydration:states` | interactive entries, after hydration: hover, focus, click the first control, `disabled` on it, `size="xl"` on the first button, `quiet` toggled, `selected` on the first menu item / tab, `invalid` on the first text field (each awaited through `updateComplete`); every step equals the full page |
+| `removeServerStyles` | `?removeStyles=1` on full and trimmed pages: no `<style>` left in sp-* shadow roots, paint equals the full page |
+| `size` | `/styles.json`: trimmed smaller than full; `report.styles` consistent |
+
+A negative control (restoration and bridge disabled) fails `post-hydration` exactly like the report (minified button
+section 98,653 px, its height 541 -> 470 px; trimmed tabs 2,155 px after hydration) and `post-hydration:states` in
+every step.
 
 ## Coding conventions
 

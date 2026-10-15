@@ -46,7 +46,15 @@ import {applyLightMutations} from './light-mutations.js';
 import {SpectrumElementRenderer} from './spectrum-element-renderer.js';
 import {ThemeRenderer} from './theme-renderer.js';
 import {inspectors} from './adapters/registry.js';
-import type {ElementReport, RenderReport, RenderSpectrumOptions, RenderSpectrumResult} from './types.js';
+import {PLACEHOLDER_RE, styleCollectorOf} from './styles/collector.js';
+import {resolveStyles} from './styles/trim.js';
+import type {
+  ElementReport,
+  RenderReport,
+  RenderSpectrumOptions,
+  RenderSpectrumResult,
+  StylesReport,
+} from './types.js';
 import './adapters/index.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -499,9 +507,29 @@ async function renderSession(value: unknown, session: RenderSession): Promise<Re
     // queue drained.
     session.lastReport = undefined;
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    // `styles: {mode: 'trimmed'}`: the shadow roots carry stylesheet placeholders; resolve them now.
+    let output = html!;
+    let styles: StylesReport | undefined;
+    const collector = styleCollectorOf(session);
+    if (collector) {
+      try {
+        const resolved = resolveStyles(output, collector);
+        output = resolved.html;
+        styles = resolved.report;
+      } catch (error) {
+        session.orphanWarnings.push(
+          `could not trim the stylesheets, the complete stylesheets are used: ${errorMessage(error)}`
+        );
+        output = output.replace(PLACEHOLDER_RE, (_match, id: string) => collector.entries[Number(id)]?.cssText ?? '');
+      }
+    }
+    const report = buildReport(session, passes);
+    if (styles) {
+      report.styles = styles;
+    }
     return {
-      html: finalizeHtml(options.debug ? html! : html!.replace(MARKER_RE, '')),
-      report: buildReport(session, passes),
+      html: finalizeHtml(options.debug ? output : output.replace(MARKER_RE, '')),
+      report,
     };
   } finally {
     // Also when the render failed. Nothing of the render may stay reachable from process-wide state.

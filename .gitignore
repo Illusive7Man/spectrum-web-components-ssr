@@ -13,3 +13,4 @@ tests/results/raw.jsonl
 .pack-check/
 packages/swc-ssr/package.json.orig
 *.tgz
+.idea

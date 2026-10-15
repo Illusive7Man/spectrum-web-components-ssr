@@ -36,12 +36,15 @@
  *    append a second copy of the content on the next update. Instead the server content is discarded (except
  *    `<style>`), the element renders client-side, and the mismatch is reported with `console.error` (so
  *    `hydrateSpectrum()` lists it in `HydrationReport.errors`).
+ * 4. The server's `<style>` elements: a hydrated element adopts the complete stylesheets of its class in place of
+ *    trimmed server CSS (and, with `removeServerStyles`, in place of the complete server CSS); see server-styles.ts.
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import {digestForTemplateResult} from '@lit-labs/ssr-client';
 import {hasServerMarkers, isSpectrumTag} from './elements.js';
+import {afterHydratingUpdate} from './server-styles.js';
 import {pinElementMedia, restoreElementMedia} from './match-media.js';
 import {
   childPositions,
@@ -380,9 +383,11 @@ function patchLitElement(LitElement: any, render: RenderFunction): void {
       update.call(this, changedProperties);
     } catch (error) {
       recover(this, error, render);
+      afterHydratingUpdate(this);
       runAdapters(this, 'afterHydrate');
       return;
     }
+    afterHydratingUpdate(this);
     runAdapters(this, 'afterHydrate');
     const plan = slotchangePlans.get(this) ?? {when: 'dispatch'};
     slotchangePlans.delete(this);
@@ -534,6 +539,30 @@ registerHydrationAdapter({
       delete controller.getHandleElements;
       controller.clearHandleComponentCache?.();
     }
+  },
+});
+
+/**
+ * `sp-menu` / `sp-menu-group` and every element built on `Menu` (`menu/src/Menu.js`; found by shape, so subclasses
+ * count): hydrated more than a frame after its items were defined, it never finishes updating, and neither does
+ * anything that awaits it (`sp-picker`, `sp-action-menu`, `sp-combobox`; `hydrateSpectrum()` then waits out its
+ * timeout twice). A menu item announces itself to its menu from a task of its own
+ * (`sp-menu-item-added-or-updated`), which reaches the menu's listener even while the menu still carries
+ * `defer-hydration`; `addChildItem()` -> `handleItemsChanged()` -> `updateCache()` then runs before the menu's first
+ * update, where it waits for `updateComplete`, and `getUpdateComplete()` waits for `cacheUpdated`, which is that very
+ * `updateCache()` call: a cycle. Client-side rendering never gets there (the menu has updated by then), and
+ * hydrating right after the definitions (the same frame) does not either. The cycle is broken at the end of the
+ * hydrating update with a `cacheUpdated` that settles with the next frame - what `updateCache()` itself waits for -
+ * so `getUpdateComplete()` continues, which in turn lets the pending `updateCache()` run its tail.
+ */
+registerHydrationAdapter({
+  tag: /^/,
+  afterHydrate(element) {
+    const menu = element as any;
+    if (menu._willUpdateItems !== true || menu.hasUpdated !== false || typeof menu.updateCache !== 'function') {
+      return;
+    }
+    menu.cacheUpdated = new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
   },
 });
 

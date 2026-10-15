@@ -8,6 +8,7 @@ import {hydrate} from '@lit-labs/ssr-client';
 import {render} from 'lit-html';
 import {hydrateShadowRoots} from '@webcomponents/template-shadowroot';
 import {installHydrationHooks} from './hooks.js';
+import {bridgeServerThemes, releaseServerStyles, setRemoveServerStyles, settleThemeBridges} from './server-styles.js';
 import {DEFER_ATTRIBUTE, isHydrationCandidate, tagsToDefine} from './elements.js';
 
 export {registerHydrationAdapter} from './hooks.js';
@@ -16,6 +17,9 @@ export type {HydrationAdapter} from './hooks.js';
 // Chains onto lit-element-hydrate-support (also before lit-element is evaluated): per-element hydration adapters,
 // the initial `slotchange` that declarative shadow roots never get, and recovery from hydration mismatches.
 installHydrationHooks(render);
+// Trimmed / minified server CSS (docs/API.md "Styles"): keeps the server's `<sp-theme>` styles while elements depend on
+// them. Must run before `<sp-theme>` is defined, like the hooks above.
+bridgeServerThemes();
 
 /** Outcome of one `hydrateSpectrum()` run. All lists are append-only and de-duplicated. */
 export interface HydrationReport {
@@ -65,6 +69,23 @@ export interface HydrateSpectrumOptions {
    * it are reported in `warnings` and hydration continues. Default 3000.
    */
   timeoutMs?: number;
+  /**
+   * Default `false`. Frees the `<style>` elements of the server-rendered shadow roots once the same CSS is in the
+   * elements' `adoptedStyleSheets` (one shared `CSSStyleSheet` per component class instead of one parsed copy per
+   * instance). A hydrated Lit element adopts its class's `elementStyles` right after its hydrating update (Lit's
+   * hydration support does not adopt anything for a declarative shadow root), `<sp-theme>` adopts its theme sheets
+   * itself and drops its declarative `<style>` when it upgrades. Elements that adopted no sheets keep their server
+   * styles, as does every element in a browser without constructable stylesheets. Applies to the elements that
+   * hydrate while this call runs, and to the ones already hydrated when it settles.
+   *
+   * Independent of this option, trimmed server CSS (`renderSpectrum({styles: {mode: 'trimmed'}})`, with or without
+   * `minifyCustomProperties`) is always replaced: a hydrated element adopts its class's complete stylesheets and drops
+   * the trimmed server `<style>` in the same task as its hydrating update, so that states the server did not render
+   * have their rules, and (minified) the renamed theme properties the trimmed CSS reads are not needed any more. On
+   * such a page every hydrated element moves to its adopted sheets, including those whose server CSS came out
+   * complete. This option only adds the complete server CSS of `full` pages (the default mode) to what is released.
+   */
+  removeServerStyles?: boolean;
 }
 
 const DEFAULT_TIMEOUT_MS = 3000;
@@ -447,6 +468,7 @@ export async function hydrateSpectrum(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const stopCapture = startCapture(report);
   adoptEarlyCapture(report);
+  setRemoveServerStyles(options.removeServerStyles === true);
   const started = performance.now();
   try {
     applyDeclarativeShadowDomPolyfill(root);
@@ -478,6 +500,13 @@ export async function hydrateSpectrum(
         await hydrateAgnostic(root, report, timeoutMs);
       }
     }
+    // Elements that hydrated before this call (deferHydration: false) and <sp-theme>, which is not a Lit element.
+    if (options.removeServerStyles === true) {
+      for (const el of collectCandidates(root)) releaseServerStyles(el);
+    }
+    // Trimmed / minified server CSS: the server's <sp-theme> styles are kept while marked <style>s are left (elements
+    // not hydrated yet); once none is left anywhere in the document, they go.
+    settleThemeBridges();
   } catch (error) {
     reportFailure(report, 'hydrateSpectrum() failed', error);
   } finally {

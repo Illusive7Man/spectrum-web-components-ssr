@@ -57,6 +57,81 @@ export interface RenderSpectrumOptions {
    * `swc-ssr/dom-shim`.
    */
   deterministicIds?: boolean;
+  /**
+   * The CSS the declarative shadow roots carry (see `StyleOptions`). Default `{mode: 'full'}`: every shadow root gets
+   * its element's complete stylesheets, byte-identical to earlier versions.
+   */
+  styles?: StyleOptions;
+}
+
+/**
+ * Size of the CSS in the server output. In `full` mode (the default) every declarative shadow root carries the
+ * complete stylesheets of its element (`elementStyles`, the theme fragments of `<sp-theme>`): about 95% of the HTML
+ * of a typical Spectrum page. `trimmed` keeps, per stylesheet, the rules that can match what the page rendered.
+ *
+ * Every `<style>` whose text was trimmed or minified carries `data-swc-styles="trimmed"` / `"minified"`
+ * (`STYLE_MARKER_ATTRIBUTE`). Lit's hydration support keeps a hydrated element's server `<style>` as its only CSS (it
+ * adopts no `elementStyles` for a declarative shadow root), while `<sp-theme>` replaces its declarative shadow root on
+ * upgrade with its complete theme fragments: `swc-ssr/client` uses the marker to give marked elements their complete
+ * stylesheets back after hydration and to keep minified theme names defined until then. The trimmed CSS itself only
+ * has to be right for the server-rendered state (first paint, no-JS views).
+ */
+export interface StyleOptions {
+  /**
+   * `'full'` (default): every shadow root carries the complete stylesheets. `'trimmed'`: only the rules whose
+   * selectors can match the rendered DOM of that stylesheet's instances on this page (state pseudo-classes such as
+   * `:hover` / `:focus-visible` and unknown pseudo-classes count as matching), plus the `@keyframes` they reference
+   * and every `@font-face` / `@property` / `@import` / `@layer` statement. All instances of one element class share
+   * one trimmed text (browsers still share identical `<style>` elements). Other values count as `'full'`.
+   */
+  mode?: 'full' | 'trimmed';
+  /**
+   * Default true (trimmed mode): drop the custom-property declarations of the theme (`<sp-theme>` fragments) that no
+   * kept rule, no `style` attribute or other `<style>` of the output and no `references` entry uses, transitively
+   * through `var()` chains (fallbacks included). Custom properties the components' own stylesheets declare are kept.
+   */
+  trimTheme?: boolean;
+  /**
+   * Custom-property names (`--name`), or prefixes ending in `*` (`--spectrum-global-*`), used by CSS the server
+   * cannot see (the application's own stylesheets): kept with their dependencies, never renamed. See
+   * `scanCustomPropertyReferences()`.
+   */
+  references?: Iterable<string>;
+  /**
+   * Prefixes of custom properties the application never defines (e.g. `['--mod-']`): `var(--mod-x, V)` becomes `V`
+   * in kept rules. Names a kept rule, a `style` attribute or another `<style>` of the output defines are left alone.
+   * Default `[]`.
+   */
+  undefinedPrefixes?: string[];
+  /**
+   * Default false. Renames the custom properties that the page's own stylesheets (theme and components) define to
+   * short names (`--a`, `--b`, ...), consistently across all of them. Names in `references`, and names that a `style`
+   * attribute or another `<style>` of the output defines or uses, are never renamed. Unsafe when the application
+   * sets or reads `--spectrum-*` / `--system-*` itself without listing them in `references`. The changed `<style>`
+   * elements carry `data-swc-styles="minified"`: an element that has not got its complete stylesheets back yet
+   * depends on the renamed theme properties, which `<sp-theme>` drops when it upgrades on the client (it replaces its
+   * declarative shadow root); `swc-ssr/client` keeps them defined until every marked element is restored.
+   */
+  minifyCustomProperties?: boolean;
+  /** Selectors (substring of, or RegExp tested against, a rule's selector text) whose rules are always kept. */
+  keep?: Array<string | RegExp>;
+}
+
+/** `RenderReport.styles` (trimmed mode only). */
+export interface StylesReport {
+  /** The `StyleOptions.mode` that ran: `'trimmed'` (also with `minifyCustomProperties`). */
+  mode: string;
+  /**
+   * One entry per stylesheet of the output: `id` is `<tag>:<index in elementStyles>`, or `<tag>:<kind>/<name>` for
+   * theme fragments; `instances`: the shadow roots carrying it; `fullBytes` / `trimmedBytes`: UTF-8 size of ONE copy.
+   */
+  sheets: Array<{id: string; tag: string; instances: number; fullBytes: number; trimmedBytes: number}>;
+  /** UTF-8 size of all copies (size x instances, summed): the CSS the page carries in `full` mode. */
+  fullBytes: number;
+  /** UTF-8 size of all trimmed copies: the CSS the page carries now. */
+  trimmedBytes: number;
+  /** Milliseconds spent trimming (part of the render's `durationMs`). */
+  durationMs: number;
 }
 
 export interface ElementReport {
@@ -74,6 +149,8 @@ export interface RenderReport {
   /** 2 normally. */
   passes: number;
   durationMs: number;
+  /** `StyleOptions.mode: 'trimmed'` only: the stylesheets and their sizes. */
+  styles?: StylesReport;
 }
 
 export interface RenderSpectrumResult {

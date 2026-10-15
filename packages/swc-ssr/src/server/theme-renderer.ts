@@ -26,10 +26,29 @@ import {
 import {setAttributeAndNotify} from './realm.js';
 import {MARKER_ATTRIBUTE} from './server-tree.js';
 import {isElementPartMarker} from './plan.js';
+import {styleCollectorOf} from './styles/collector.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const THEME_KINDS = ['system', 'color', 'scale'] as const;
+
+/** `<kind>/<name>` of a registered theme fragment (`Theme.themeFragmentsByKind`), for the styles report. */
+function fragmentLabel(ctor: any, style: unknown): string {
+  const byKind: Map<string, Map<string, {name?: string; styles?: unknown}>> | undefined = ctor?.themeFragmentsByKind;
+  let fallback: string | undefined;
+  for (const [kind, fragments] of byKind ?? []) {
+    for (const [name, fragment] of fragments) {
+      const styles = fragment?.styles;
+      if (styles === style || (Array.isArray(styles) && styles.flat(Infinity).includes(style))) {
+        if (name !== 'default') {
+          return `${kind}/${name}`;
+        }
+        fallback ??= `${kind}/${fragment.name ?? name}`;
+      }
+    }
+  }
+  return fallback ?? 'fragment';
+}
 
 export class ThemeRenderer extends ElementRenderer {
   declare element: HTMLElement;
@@ -144,9 +163,15 @@ export class ThemeRenderer extends ElementRenderer {
         plan?.report.errors.push(`styles: ${errorMessage(error)}`);
       }
       if (styles.length > 0) {
+        // `styles: {mode: 'trimmed'}`: placeholders, resolved after the final pass (styles/trim.ts).
+        const collector = styleCollectorOf((plan?.context ?? getCurrentRenderContext())?.session);
         result.push('<style>');
         for (const style of styles) {
-          result.push(String(style?.cssText ?? ''));
+          result.push(
+            collector
+              ? collector.placeholder(this.tagName, style, () => `${this.tagName}:${fragmentLabel(ctor, style)}`, true)
+              : String(style?.cssText ?? '')
+          );
         }
         result.push('</style>');
       }
