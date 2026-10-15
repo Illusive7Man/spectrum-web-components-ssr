@@ -68,7 +68,9 @@ export interface RenderSpectrumOptions {
   timeoutMs?: number;                // deadline of one render; default 10000, 0 / Infinity disables it
                                      // (values >= 2^31 ms, beyond the longest timer delay, count as Infinity)
   lazyDefinitionWaitMs?: number;     // wait for lazily imported definitions; default 250, 0 disables it;
-                                     // Infinity (or >= 2^31 ms): wait until defined, bounded by timeoutMs
+                                     // never beyond the render's deadline (timeoutMs). Infinity (or >= 2^31
+                                     // ms): up to the deadline (then: pass-1 output + warning); without a
+                                     // deadline the default 250 ms. Once per tag and process (see below)
   lang?: string;                     // document language during the render (document.documentElement.lang,
                                      // restored afterwards); components resolve their locale from it. Without
                                      // it, a whole-document template's own <html lang> is used from pass 2 on
@@ -145,7 +147,10 @@ ones included, and evaluated after the element's attributes and properties are s
 element and pass, before anything connects it: pre-built elements when they are created (the renderer that adopts
 one reuses that decision; it does not ask again after the document lifecycle updated the element). With
 `disableSsr` the element is not pooled, connected or updated; it renders without a shadow root (upstream's output)
-with its light DOM, and other elements see a plain facade of it.
+with its light DOM, and other elements see a plain facade of it. The pre-built instance of such an element is
+discarded (never connected), and the renderer reuses the decision made on it for the element it builds instead
+(since 0.1.2; 0.1.1 asked again: three evaluations over two passes), so `disableSsr` elements are evaluated once per
+pass too, on an instance that has the previous pass's attributes and properties, like every pre-built element.
 
 Connected elements get browser-like attribute reactions: when an observed attribute changes through the element's
 own `setAttribute` / `removeAttribute` / `toggleAttribute` (component code), its `attributeChangedCallback` runs, as
@@ -163,6 +168,15 @@ in browsers. Writes made by the renderer (upstream `ElementRenderer.setAttribute
 * `lazyDefinitionWaitMs`: components that import what they render lazily (`sp-slider` -> `sp-number-field`) render
   those tags as plain elements first; the render waits (once per tag and process) for definitions of tags it
   rendered while undefined and repeats pass 1 when they arrive (also when a tag got defined while pass 1 ran).
+  "Once per tag and process": whenever a wait ends - the definitions arrived, the wait time passed, or the render's
+  deadline ended it - the tags still undefined are never waited for again. The wait never goes beyond the render's
+  deadline. `Infinity` (or >= 2^31 ms) means "up to the deadline": when the deadline passes during the wait, the
+  render returns its pass-1 output with the `#render` warning `the render did not settle within N ms: the wait for
+  lazily defined elements (<tag>) was abandoned, the output of pass 1 is used` - so a client-only element that is
+  never defined on the server costs one such render per process, later renders do not wait for it. A render
+  without a deadline (`timeoutMs` 0 / Infinity) waits the default 250 ms for `Infinity`: an unbounded wait for a
+  tag that is never defined would never end. Lazily defined tags are only noticed in components' `render()`
+  results, not in the top-level template.
 * At the end of every render (also a failed one), every element swc-ssr connected, in any pass, gets its
   `disconnectedCallback` (like a browser removing the tree), the pass contexts are disposed, and the render waits one
   event-loop turn (`setTimeout 0`) with its session still active before the report is built, so zero-delay timers and
@@ -187,13 +201,18 @@ The pass-2 pool is keyed structurally: tree scope + tag + a short hash of the te
 ordinal. Adoption of a previous-pass instance is refused when its static attributes differ; attributes the previous
 pass's element got from upstream that are not set again are removed (with `attributeChangedCallback`) before the
 lifecycle runs. The key is all upstream gives a renderer when it constructs it (the element's light DOM is rendered
-later), so adoptions are verified after the pass, against the pass's own output: an element whose light DOM (child
-tags, `slot` names, text) differs from that of the element it adopted, while another element of the same tag,
-static attributes and scope has exactly that light DOM, adopted the wrong instance; it is reported and another pass
-is made, whose ordinals follow the new order. Elements that are the same element with changed content are not
-affected. The sequential `id` is the `data-swc-ssr` value and the report id. Elements pre-built from the
-previous pass but not rendered, or only present in earlier passes, are reported with `id: -1` (only when they have
-messages). Messages of earlier passes are prefixed `pass N: `.
+later), so adoptions are verified after the pass, against the pass's own output and records, by two criteria:
+the element's light DOM (child tags, `slot` names, text), and the attributes / properties upstream set on it (its
+bindings; since 0.1.2, skipped when the light DOM alone identifies the element). An element that differs by one of
+them from the element it adopted, while another element of the same tag, static attributes and scope explains the
+difference - an element of this pass that is like the adopted one and did not get a matching instance itself, or a
+previous-pass element like this one that no matching element adopted - adopted the wrong instance; it is reported
+and another pass is made, whose ordinals follow the new order. Elements that are the same element with changed
+content or bound values are not affected (since 0.1.2 also when a sibling has the old content). Elements with no
+light DOM that differ only by a bound value which moves from one to another between the passes cannot be told from
+reordered ones (a third pass and the warning). The sequential `id` is the `data-swc-ssr` value and the report id.
+Elements pre-built from the previous pass but not rendered, or only present in earlier passes, are reported with
+`id: -1` (only when they have messages). Messages of earlier passes are prefixed `pass N: `.
 
 Messages that can appear:
 
@@ -203,11 +222,12 @@ Messages that can appear:
 | `disconnectedCallback: ...` | element | its `disconnectedCallback` threw at the end of the render |
 | `updated after its markup was emitted in pass N (changed: a, b); another pass is made` | element | a `full` element was updated after its markup was emitted (last pass: `the output shows the earlier state`) |
 | `dropped DOM change: <op>(<node>) on <target> [in <host>] has no effect on the server output ...` | the element whose code made the change, else the closest rendered custom element, else `#render` | structure changes on rendered nodes (from pass 2 on), e.g. `sp-table` checkbox cells |
-| `light-DOM attribute change not applied: ...` | host or `#render` | an attribute change on a plain element could not be located in the final output: no element with its signature (tag, `id`, `name`, `slot`, `type`, `role`, `part`, `for`, `href`, `src`, `class`), or several and not exactly one with its content (child tags, text) |
-| `adopted candidate rejected: light DOM differs from the pass-N <tag> it was matched with ...; another pass is made` | element | the element took over the previous-pass instance of another element of the same kind (see above); the next pass corrects it (last pass: `the output may show the state of that element`) |
+| `light-DOM attribute change not applied: ...` | host or `#render` | an attribute change on a plain element could not be located in the final output: no element with its signature (tag, `id`, `name`, `slot`, `type`, `role`, `part`, `for`, `href`, `src`, `class`), or several, not exactly one with its content (child tags, text), and the scope's structure along the element's path changed (with an unchanged structure the element at the recorded position gets the change) |
+| `adopted candidate rejected: light DOM differs from the pass-N <tag> it was matched with ...; another pass is made` (or `upstream attributes / properties differ ...`) | element | the element took over the previous-pass instance of another element of the same kind (see above); the next pass corrects it (last pass: `the output may show the state of that element`) |
 | `locale: no language is set ...` | element | its locale falls back to `navigator.language` (pass `lang`, or set `<sp-theme lang>`) |
 | `attributeChangedCallback(<name>): ...` | element | an attribute reaction threw |
 | `the render did not settle within N ms: pass K was abandoned, the output of pass K-1 is used` | `#render` | see `timeoutMs` |
+| `the render did not settle within N ms: the wait for lazily defined elements (<tag>) was abandoned, the output of pass 1 is used` | `#render` | the deadline passed while pass 1 waited for lazy definitions (see `lazyDefinitionWaitMs`) |
 
 `ServerTree` (internal, `packages/swc-ssr/src/server/server-tree.ts`): parse5 (htmlparser2 adapter) document of the pass-1
 HTML with lookup `byId(id)`, `lightChildren(id)`, `shadowRoot(id)`, `query(node, selector)`, `queryAll(node, selector)` via `css-select`,

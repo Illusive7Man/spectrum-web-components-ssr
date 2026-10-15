@@ -1,6 +1,6 @@
 # Spectrum SSR support matrix
 
-- Run: 2026-10-15T01:51:59.216Z
+- Run: 2026-10-15T09:02:36.989Z
 - **55/59 components fully green**
 - Per check: SSR markup 59/59, hydration 59/59, flicker 58/59, fidelity 56/59, interaction 20/20
 - Thresholds: flicker < 0.200 % of pixels, CLS < 0.01, fidelity = post-hydration DOM equals the client-rendered DOM

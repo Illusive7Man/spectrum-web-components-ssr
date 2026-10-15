@@ -38,7 +38,9 @@ export interface RenderSpectrumOptions {
   /**
    * How long a render waits (once per tag and process) for definitions of custom elements that components
    * rendered while undefined (lazy `import()` in `render()`, e.g. `sp-slider` -> `sp-number-field`); default 250,
-   * 0 disables the wait.
+   * 0 disables the wait. Never beyond the render's deadline (`timeoutMs`). `Infinity` (or >= 2^31 ms): up to the
+   * deadline - when it passes, the render returns its pass-1 output with a warning; a render without a deadline
+   * waits the default 250 ms instead. Tags still undefined when the wait ends are never waited for again.
    */
   lazyDefinitionWaitMs?: number;
   /**

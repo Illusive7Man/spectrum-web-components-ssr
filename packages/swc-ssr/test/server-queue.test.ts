@@ -199,3 +199,73 @@ test('lazyDefinitionWaitMs of 2^31 ms and more waits for the definition (it used
   );
   assert.match(output, /<x-defined-later[^>]*><template shadowroot[^>]*>[\s\S]*defined later/);
 });
+
+/*
+ * Third review (medium, regression of 0.1.1): with `lazyDefinitionWaitMs: Infinity` (or >= 2^31 ms) a tag that is
+ * never defined on the server (a client-only element in a component's render()) made every render wait until its
+ * deadline and then reject ('pass 1 did not complete'); the tag was never given up.
+ */
+
+class XClientOnlyHost extends SpectrumElement {
+  override render() {
+    return html`<x-client-only-chart></x-client-only-chart>`;
+  }
+}
+customElements.define('x-client-only-host', XClientOnlyHost);
+
+class XClientOnlyHost2 extends SpectrumElement {
+  override render() {
+    return html`<x-client-only-map></x-client-only-map>`;
+  }
+}
+customElements.define('x-client-only-host-2', XClientOnlyHost2);
+
+test('lazyDefinitionWaitMs: Infinity waits up to the render deadline, once per tag and process', async () => {
+  const cases = [
+    {tag: 'x-client-only-host', template: html`<x-client-only-host></x-client-only-host>`, wait: Infinity},
+    {tag: 'x-client-only-host-2', template: html`<x-client-only-host-2></x-client-only-host-2>`, wait: 2 ** 31},
+  ];
+  for (const {tag, template, wait} of cases) {
+    const options = {lazyDefinitionWaitMs: wait, timeoutMs: 300};
+    const first = await settleWithin(renderSpectrum(template, options), 5000, `render 1 (${wait})`).catch(
+      (error: Error) => error
+    );
+    assert.ok(!(first instanceof Error), `render 1 (${wait}) falls back to the pass-1 output: ${String(first)}`);
+    assert.match(first.html, new RegExp(`<${tag}[^>]*><template shadowroot`), 'the pass-1 output');
+    assert.ok(
+      first.report.elements.some(
+        (element) =>
+          element.tagName === '#render' && element.warnings.some((message) => message.includes('lazily defined'))
+      ),
+      formatReport(first.report)
+    );
+    for (let i = 2; i <= 3; i++) {
+      const started = performance.now();
+      const later = await settleWithin(renderSpectrum(template, options), 5000, `render ${i} (${wait})`);
+      assert.ok(performance.now() - started < 250, `render ${i} (${wait}) does not wait again`);
+      assert.equal(later.report.passes, 2, formatReport(later.report));
+    }
+  }
+});
+
+class XClientOnlyHost3 extends SpectrumElement {
+  override render() {
+    return html`<x-client-only-graph></x-client-only-graph>`;
+  }
+}
+customElements.define('x-client-only-host-3', XClientOnlyHost3);
+
+test('lazyDefinitionWaitMs: Infinity without a render deadline waits the default 250 ms', async () => {
+  // The guard timer is created before longTimers() records the delays.
+  let guard: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<never>((_resolve, reject) => {
+    guard = setTimeout(() => reject(new Error('the render did not settle within 5000 ms')), 5000);
+  });
+  const delays = await Promise.race([
+    longTimers(() =>
+      renderSpectrum(html`<x-client-only-host-3></x-client-only-host-3>`, {lazyDefinitionWaitMs: Infinity, timeoutMs: 0})
+    ),
+    timedOut,
+  ]).finally(() => clearTimeout(guard));
+  assert.deepEqual(delays, [250], 'an unbounded wait would never end for a tag that is never defined');
+});

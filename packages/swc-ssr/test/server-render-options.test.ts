@@ -204,3 +204,26 @@ test('renderOptions are decided once per element, before it is connected, also f
   assert.ok(shadowTemplateOf(hostOf(output, 'x-reflects-ready')), 'rendered with its shadow root (the decision made before connecting)');
   assert.equal(stateOf(output, 'x-reflects-ready'), 'rendered');
 });
+
+customElements.define('x-optout-counted', counting(SpectrumElement));
+
+test('renderOptions of a disableSsr element are evaluated once per pass as well', async (t) => {
+  // Third review (low): the decision made on the instance pre-built from the previous pass (discarded because of
+  // disableSsr) was not reused for the element the renderer builds instead: three evaluations over two passes.
+  let evaluations = 0;
+  const callback = (element: HTMLElement) => {
+    if (element.localName !== 'x-optout-counted') {
+      return undefined;
+    }
+    evaluations++;
+    return {disableSsr: true};
+  };
+  renderOptions.push(callback);
+  t.after(() => renderOptions.splice(renderOptions.indexOf(callback), 1));
+  reset();
+  const {html: output, report} = await renderSpectrum(html`<x-optout-counted><b>light</b></x-optout-counted>`);
+  assert.equal(report.passes, 2);
+  assert.equal(evaluations, 2, 'once per element and pass');
+  assert.equal(shadowTemplateOf(hostOf(output, 'x-optout-counted')), undefined, 'still rendered without a shadow root');
+  assert.equal(countsOf('x-optout-counted').connected, 0, 'never connected');
+});

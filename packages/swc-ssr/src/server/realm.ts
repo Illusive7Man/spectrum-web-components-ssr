@@ -131,8 +131,11 @@ export class TreeRealm {
   private readonly nodesByFacade = new WeakMap<object, TreeNode>();
   private readonly constructing = new Set<TreeElementNode>();
   private readonly failed = new Set<TreeElementNode>();
-  /** Nodes whose element opted out of SSR (`renderOptions` `disableSsr`): never pooled, plain facades. */
-  private readonly ssrDisabled = new Set<TreeElementNode>();
+  /**
+   * Nodes whose element opted out of SSR (`renderOptions` `disableSsr`): never pooled, plain facades. The value is
+   * the decision, reused for the element the renderer builds for the node (see `renderOptionsOf`).
+   */
+  private readonly ssrDisabled = new Map<TreeElementNode, ElementRenderOptions>();
   /** Effective lifecycle of each pooled instance (class, adapter, options and its `renderOptions`). */
   private readonly modes = new WeakMap<HTMLElement, LifecycleMode>();
   /** The `LitElementRenderer.renderOptions` decision made for each pooled instance (see `renderOptionsOf`). */
@@ -580,7 +583,7 @@ export class TreeRealm {
     if (renderOptions?.disableSsr) {
       // No pooling, no connect, no lifecycle: the renderer builds the element as upstream does and renders it
       // without a shadow root; the other elements see a plain facade of it.
-      this.ssrDisabled.add(node);
+      this.ssrDisabled.set(node, renderOptions);
       this.context.pool.delete(record.key);
       this.instances.delete(node);
       this.facades.delete(node);
@@ -603,9 +606,21 @@ export class TreeRealm {
    * document lifecycle had connected and updated it - so a callback that depends on an attribute the element
    * reflects in its first update could flip to `disableSsr` for an element that was already connected and updated.
    * Upstream evaluates them once per element, before it connects it; so does swc-ssr now.
+   *
+   * `node`: the tree node of an element the renderer built itself because the instance pre-built for that node
+   * opted out (`disableSsr`, discarded unconnected). Third review (fixed): its callbacks were evaluated again on the
+   * renderer's element - three evaluations over two passes. The decision made for the node is reused, which also
+   * keeps the element's rendering consistent with the plain facade the other elements saw in this pass.
    */
-  renderOptionsOf(element: HTMLElement): {found: boolean; options: ElementRenderOptions | undefined} {
-    return {found: this.renderOptions.has(element), options: this.renderOptions.get(element)};
+  renderOptionsOf(
+    element: HTMLElement,
+    node?: TreeElementNode
+  ): {found: boolean; options: ElementRenderOptions | undefined} {
+    if (this.renderOptions.has(element)) {
+      return {found: true, options: this.renderOptions.get(element)};
+    }
+    const disabled = node ? this.ssrDisabled.get(node) : undefined;
+    return disabled ? {found: true, options: disabled} : {found: false, options: undefined};
   }
 
   /** Gives an instance its tree backing, shadow root facade and event-path links. */

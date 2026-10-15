@@ -4,6 +4,31 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 Until 1.0.0 a minor version may contain breaking changes.
 
+## [0.1.2] - unreleased
+
+Fixes of a third review (details: `docs/DESIGN.md`, "Hardening" / "Third review").
+
+### Fixed
+
+- Light-DOM attribute changes (e.g. the ids components give slotted headings for `aria-labelledby`) are applied
+  again when several same-signature elements of a scope changed their content between the passes and the scope kept
+  its structure; 0.1.1 dropped them with a warning, leaving dangling references (regression of 0.1.1).
+- `lazyDefinitionWaitMs: Infinity` (or >= 2^31 ms) no longer makes every render wait until `timeoutMs` and reject
+  when a tag is never defined on the server: the wait is bounded by the render's deadline, pass 1 is kept as fallback
+  output, and tags still undefined when a wait ends (for any reason) are never waited for again (regression of 0.1.1).
+- Elements of the same kind told apart only by bound attributes / properties no longer silently take over each
+  other's instance when one is rendered before the other in a later pass: adoptions are also verified against the
+  values upstream set (`adopted candidate rejected: upstream attributes / properties differ`, one more pass).
+- An element whose light DOM changed between the passes while a sibling has its old content no longer gets a spurious
+  `adopted candidate rejected` warning and a third pass.
+- `LitElementRenderer.renderOptions` of `disableSsr` elements are evaluated once per pass (were three times over two
+  passes): the decision made on the discarded pre-built instance is reused.
+
+### Changed
+
+- `lazyDefinitionWaitMs: Infinity` means "up to the render's deadline" (that render returns its pass-1 output with a
+  warning); in a render without a deadline it means the default 250 ms.
+
 ## [0.1.1] - unreleased
 
 Fixes of a second independent review (details: `docs/DESIGN.md`, "Hardening" / "Second review").

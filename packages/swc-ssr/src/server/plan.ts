@@ -253,6 +253,42 @@ export function needsAdoptionCheck(context: RenderContext): boolean {
 }
 
 /**
+ * Whether an element of this pass (`current`) and one of the previous pass (`previous`) look like the same element by
+ * one criterion: true / false, or undefined when it cannot tell (see `verifyAdoptions`).
+ */
+type Likeness = (current: ElementRecord, previous: ElementRecord) => boolean | undefined;
+
+/**
+ * Whether `record` (this pass) adopted the wrong previous-pass element (`source`) by the criterion `same`: they
+ * differ, and the difference is explained by another member of the group - an element of this pass that is like
+ * `source` and did not get a matching instance itself (none, or one it is not like), or a previous-pass element
+ * like `record` that no element of this pass like it adopted. Third review (fixed): 0.1.1 counted every other
+ * element like `source`, so an element whose light DOM changed while a sibling kept its old content ('A' -> 'B'
+ * next to an 'A') was rejected - a warning and a third pass for nothing.
+ */
+function misadopted(
+  record: ElementRecord,
+  source: ElementRecord,
+  group: KeyGroup,
+  same: Likeness,
+  sourceOf: (record: ElementRecord) => ElementRecord | undefined
+): boolean {
+  if (same(record, source) !== false) {
+    return false;
+  }
+  const unmatched = (other: ElementRecord): boolean => {
+    const adopted = sourceOf(other);
+    return !adopted || same(other, adopted) === false;
+  };
+  const adoptedByLike = (other: ElementRecord): boolean =>
+    group.current.some((candidate) => candidate.adoptedFrom === other.id && same(candidate, other) === true);
+  return (
+    group.current.some((other) => other !== record && same(other, source) === true && unmatched(other)) ||
+    group.previous.some((other) => other !== source && same(record, other) === true && !adoptedByLike(other))
+  );
+}
+
+/**
  * Review finding (fixed): pass >= 2 matches an element with the previous pass's element of the same key - tree scope
  * + tag + static attributes + ordinal - when upstream constructs its renderer, which is before the element's light
  * DOM is rendered (upstream gives renderers nothing but the tag and the static attributes). So when a component
@@ -260,15 +296,28 @@ export function needsAdoptionCheck(context: RenderContext): boolean {
  * DOM (or drops or reorders such elements), the elements took over each other's instance, light-DOM facade and
  * state, silently.
  *
- * After the pass, `tree` (the pass's own output) shows every element's light DOM. An element whose light DOM differs
- * from that of the previous-pass element it adopted, while another element of the same kind (tag, static
- * attributes, scope) has exactly that light DOM - in this pass, or in the previous one - was matched with the wrong
- * element: it is reported (`adopted candidate rejected: light DOM differs`), and the caller makes another pass.
- * That pass is built from this pass's output, where the ordinals already follow the new order, so every element
- * then adopts its own previous element (its light DOM and state). A light-DOM signature cannot be part of the key
- * itself: it is unknown when the renderer is constructed. Elements whose light DOM simply changed between the
- * passes (the same element with new content) are not affected: no other element has their previous light DOM.
- * Returns the number of rejected adoptions.
+ * After the pass, `tree` (the pass's own output) shows every element's light DOM, and the records hold what upstream
+ * set on every element (attributes and properties of the template's bindings). An adoption is checked by two
+ * criteria, each with `misadopted`:
+ *
+ *  1. light DOM (`server-tree.ts` `lightSignature`: child tags with `slot`, text);
+ *  2. the attributes and properties upstream set (third review: elements told apart only by bound attributes /
+ *     properties, e.g. `<x-leaf label=${'extra'}>` rendered before `<x-leaf label=${'main'}>`, still swapped
+ *     instances silently). Static attributes are equal within a group by construction. Property values are compared
+ *     with `sameValue`, previous-pass instances translated to this pass's (`TreeRealm.translate`); values created
+ *     anew in every render (object literals, closures) never compare equal, so they never confirm another candidate
+ *     either (no rejection). Skipped when the light DOM already identifies the element: same light DOM as its
+ *     source, and no other member of the group has it (e.g. tabs with distinct labels whose bound `selected`
+ *     moved between the passes).
+ *
+ * A wrong adoption is reported (`adopted candidate rejected: ...`), and the caller makes another pass. That pass is
+ * built from this pass's output, where the ordinals already follow the new order, so every element then adopts its
+ * own previous element (its light DOM, attributes and state). Neither criterion can be part of the key itself: the
+ * light DOM is unknown when the renderer is constructed, and the bound values are set after it. Elements whose light
+ * DOM or bound values simply changed between the passes (the same element with new content / state) are not
+ * affected. Limitation: elements with no light DOM that differ only by a bound value that moves from one to another
+ * between the passes (e.g. a selection flag on otherwise identical elements) cannot be told from reordered
+ * elements: they cost a third pass and the warning. Returns the number of rejected adoptions.
  */
 export function verifyAdoptions(context: RenderContext, tree: ServerTree, willRetry: boolean): number {
   const previous = context.previous;
@@ -284,30 +333,63 @@ export function verifyAdoptions(context: RenderContext, tree: ServerTree, willRe
     }
     return signatures.get(record);
   };
+  const sameLight: Likeness = (current, before) => {
+    const mine = signature(current, tree);
+    const theirs = signature(before, previousTree);
+    return mine === undefined || theirs === undefined ? undefined : mine === theirs;
+  };
+  const translate = (value: unknown): unknown => context.realm?.translate(value) ?? value;
+  const sameBindings: Likeness = (current, before) => {
+    if (current.attributes.size !== before.attributes.size || current.properties.size !== before.properties.size) {
+      return false;
+    }
+    for (const [name, value] of current.attributes) {
+      if (before.attributes.get(name) !== value) {
+        return false;
+      }
+    }
+    for (const [name, value] of current.properties) {
+      if (!before.properties.has(name) || !sameValue(value, translate(before.properties.get(name)))) {
+        return false;
+      }
+    }
+    return true;
+  };
+  const sourceOf = (record: ElementRecord): ElementRecord | undefined =>
+    record.adoptedFrom === undefined ? undefined : previous.records.get(record.adoptedFrom);
   let rejected = 0;
   for (const group of ambiguousGroups(context)) {
+    /** Whether the light DOM alone identifies `record` as `source` (no other member of the group has it). */
+    const identifiedByLight = (record: ElementRecord, source: ElementRecord): boolean => {
+      if (sameLight(record, source) !== true) {
+        return false;
+      }
+      const mine = signature(record, tree);
+      return (
+        !group.current.some((other) => other !== record && signature(other, tree) === mine) &&
+        !group.previous.some((other) => other !== source && signature(other, previousTree) === mine)
+      );
+    };
     for (const record of group.current) {
-      const source = record.adoptedFrom === undefined ? undefined : previous.records.get(record.adoptedFrom);
+      const source = sourceOf(record);
       if (!source) {
         continue;
       }
-      const mine = signature(record, tree);
-      const theirs = signature(source, previousTree);
-      if (mine === undefined || theirs === undefined || mine === theirs) {
-        continue;
+      let differs: {what: string; that: string} | undefined;
+      if (misadopted(record, source, group, sameLight, sourceOf)) {
+        differs = {what: 'light DOM differs', that: 'that light DOM'};
+      } else if (!identifiedByLight(record, source) && misadopted(record, source, group, sameBindings, sourceOf)) {
+        differs = {what: 'upstream attributes / properties differ', that: 'those values'};
       }
-      const belongsElsewhere =
-        group.current.some((other) => other !== record && signature(other, tree) === theirs) ||
-        group.previous.some((other) => other !== source && signature(other, previousTree) === mine);
-      if (!belongsElsewhere) {
+      if (differs === undefined) {
         continue;
       }
       rejected++;
       context.reportsByKey
         .get(record.key)
         ?.warnings.push(
-          `adopted candidate rejected: light DOM differs from the pass-${previous.pass} <${record.tag}> it was matched ` +
-            'with (another element of the same kind in this scope has that light DOM)' +
+          `adopted candidate rejected: ${differs.what} from the pass-${previous.pass} <${record.tag}> it was ` +
+            `matched with (another element of the same kind in this scope has ${differs.that})` +
             (willRetry ? '; another pass is made' : '; the output may show the state of that element')
         );
     }

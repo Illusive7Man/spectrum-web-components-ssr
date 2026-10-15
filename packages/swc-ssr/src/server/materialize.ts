@@ -245,14 +245,33 @@ function noteUndefinedTag(tag: string): void {
   tags.add(tag);
 }
 
+/** How long `awaitLazyDefinitions` may wait. */
+export interface LazyDefinitionWait {
+  /**
+   * The longest wait in ms; 0 (or less, NaN) disables it; `Infinity` (or more than the longest timer delay): no
+   * timer, only `signal` ends the wait (see `lazyDefinitionWait` in render-spectrum.ts).
+   */
+  waitMs: number;
+  /** Ends the wait (the render's deadline passed). */
+  signal?: AbortSignal;
+  /** Called with the tags about to be waited for (before waiting). */
+  onWait?(tags: readonly string[]): void;
+}
+
 /**
  * After a pass of `session`: whether templates of that pass rendered custom element tags that were undefined then
  * and are defined now - then the pass must be rendered again. Tags still undefined (a component imports what it
- * renders lazily, e.g. `slider/src/Slider.js` -> `sp-number-field`) are waited for up to `timeoutMs`, each at most
- * once per process; nothing is waited for when every rendered tag was defined (review M6: the wait used to be on
- * the critical path of renders that did not need it) or `timeoutMs` is 0. Resets the session's list.
+ * renders lazily, e.g. `slider/src/Slider.js` -> `sp-number-field`) are waited for up to `waitMs`, each at most
+ * once per process: whenever the wait ends - the definitions arrived, `waitMs` passed, or `signal` (the render's
+ * deadline) ended it - the tags still undefined are never waited for again. Nothing is waited for when every
+ * rendered tag was defined (review M6: the wait used to be on the critical path of renders that did not need it)
+ * or `waitMs` is 0. Resets the session's list.
+ *
+ * Third review (fixed): with `lazyDefinitionWaitMs: Infinity` 0.1.1 raced the definitions against nothing, so a tag
+ * that is never defined on the server (a client-only element) kept every render waiting until its deadline (which
+ * then rejected: pass 1 had not been recorded yet), was never given up, and the pending wait kept the render alive.
  */
-export async function awaitLazyDefinitions(session: object, timeoutMs: number): Promise<boolean> {
+export async function awaitLazyDefinitions(session: object, wait: LazyDefinitionWait): Promise<boolean> {
   const seen = undefinedTagsBySession.get(session);
   undefinedTagsBySession.delete(session);
   if (!seen || seen.size === 0) {
@@ -262,24 +281,35 @@ export async function awaitLazyDefinitions(session: object, timeoutMs: number): 
   // Defined while the pass was still running (e.g. a lazy import that resolved during an await of the pass).
   const definedMeanwhile = [...seen].some((tag) => !!registry?.get(tag));
   const waiting = [...seen].filter((tag) => !registry?.get(tag) && !abandonedTags.has(tag));
-  if (waiting.length === 0 || !(timeoutMs > 0) || typeof registry?.whenDefined !== 'function') {
+  if (waiting.length === 0 || !(wait.waitMs > 0) || typeof registry?.whenDefined !== 'function') {
     return definedMeanwhile;
   }
-  // `Infinity` (and anything beyond the longest timer delay, which Node would turn into 1 ms): wait until the
-  // definitions arrive, bounded only by the render's deadline (`timeoutMs` of the render).
-  const delay = timerDelay(timeoutMs);
+  wait.onWait?.(waiting);
+  // No timer for `Infinity` (see `timerDelay`): the render's deadline (`signal`) ends the wait.
+  const delay = timerDelay(wait.waitMs);
   let timer: ReturnType<typeof setTimeout> | undefined;
-  await Promise.race([
-    Promise.all(waiting.map((tag) => registry.whenDefined(tag))),
-    ...(delay === undefined
-      ? []
-      : [
-          new Promise((resolve) => {
+  let onAbort: (() => void) | undefined;
+  try {
+    if (!wait.signal?.aborted) {
+      await Promise.race([
+        Promise.all(waiting.map((tag) => registry.whenDefined(tag))),
+        new Promise<void>((resolve) => {
+          if (delay !== undefined) {
             timer = setTimeout(resolve, delay);
-          }),
-        ]),
-  ]);
-  clearTimeout(timer);
+          }
+          if (wait.signal) {
+            onAbort = resolve;
+            wait.signal.addEventListener('abort', onAbort, {once: true});
+          }
+        }),
+      ]);
+    }
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) {
+      wait.signal!.removeEventListener('abort', onAbort);
+    }
+  }
   let defined = definedMeanwhile;
   for (const tag of waiting) {
     if (registry.get(tag)) {

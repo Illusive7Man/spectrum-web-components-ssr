@@ -173,3 +173,61 @@ test('an ambiguous change (several same-signature elements, none with the record
     formatReport(report)
   );
 });
+
+/*
+ * Third review (medium, regression of 0.1.1): with several same-signature elements in a scope whose content changed
+ * between the passes (none of them has the recorded content any more), the change was dropped with a warning
+ * although the scope kept its structure - e.g. headings whose text a host renders from state it only knows from
+ * pass 2 on: their ids were lost while the components' `aria-labelledby` pointed at them (dangling references). The
+ * element at the recorded position is used again when the scope's structure along its path is unchanged.
+ */
+
+let titledCount = 0;
+
+/** Gives its slotted heading an id and points its own `aria-labelledby` at it (like `dialog/src/Dialog.js`). */
+class XTitled extends SpectrumElement {
+  override firstUpdated() {
+    const heading = this.querySelector('[slot="heading"]') as any;
+    if (heading && !heading.id) {
+      heading.id = `titled-${++titledCount}`;
+    }
+    this.setAttribute('aria-labelledby', heading?.id ?? 'none');
+  }
+  override render() {
+    return html`<slot name="heading"></slot><slot></slot>`;
+  }
+}
+customElements.define('x-titled', XTitled);
+
+/** Two titled elements whose heading text depends on whether the host knows its light DOM (pass 2 on). */
+class XTitledHost extends XScopeShift {
+  override render() {
+    const state = this.known ? 'ready' : 'loading';
+    return html`<x-titled><h2 slot="heading">First (${state})</h2>body 1</x-titled><x-titled
+        ><h2 slot="heading">Second (${state})</h2>body 2</x-titled
+      ><slot></slot>`;
+  }
+}
+customElements.define('x-titled-host', XTitledHost);
+
+test('changes stay at the recorded position when same-signature elements only changed their content', async () => {
+  const {html: output, report} = await renderSpectrum(html`<x-titled-host><p>light</p></x-titled-host>`);
+  const titled = shadowElements(output, 'x-titled-host').filter((element) => element.name === 'x-titled');
+  assert.equal(titled.length, 2);
+  for (const element of titled) {
+    const heading = findElement(element, (child) => child.name === 'h2');
+    const labelledBy = element.attribs['aria-labelledby'];
+    assert.ok(labelledBy && labelledBy !== 'none', 'precondition: the component labelled itself');
+    assert.equal(
+      heading?.attribs.id,
+      labelledBy,
+      `the heading "${textOf(heading!)}" carries the id its host refers to:\n${formatReport(report)}`
+    );
+  }
+  assert.ok(
+    !report.elements.some((element) =>
+      element.warnings.some((message) => message.includes('light-DOM attribute change not applied'))
+    ),
+    formatReport(report)
+  );
+});

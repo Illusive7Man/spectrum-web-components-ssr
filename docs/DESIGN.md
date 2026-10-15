@@ -230,14 +230,15 @@ Server (`swc-ssr/server`, all outside Spectrum sources):
 * Render end: elements are disconnected (`disconnectedCallback` on everything swc-ssr connected, every pass), pass
   contexts disposed, one event-loop turn before the result (see "Hardening" below).
 * Light mutations are located by the element-child path in their tree scope and must match the recorded element's
-  signature (tag + `id`/`name`/`slot`/`type`/`role`/`part`/`for`/`href`/`src` + `class`); otherwise the change moves to
-  the single exact match in the scope, or is skipped with a warning. Whole documents are parsed with parse5 `parse()`
+  signature (tag + `id`/`name`/`slot`/`type`/`role`/`part`/`for`/`href`/`src` + `class`) and content; otherwise the
+  change moves to the single exact match in the scope, or stays at the recorded position when the scope's structure
+  along the path is unchanged, or is skipped with a warning (order: `light-mutations.ts` file comment). Whole documents are parsed with parse5 `parse()`
   (`isDocumentHtml` is shared with `ServerTree`).
 * The previous pass's shadow used as fallback output has its `data-swc-ssr` markers stripped
   (`ServerTree.serializeShadow(id, {stripMarkers: true})`).
 * Lazy definitions: undefined tags are tracked per render session; pass 1 is repeated when such a tag got defined
-  while the pass was running too. The wait is configurable (`lazyDefinitionWaitMs`) and only happens for tags this
-  render rendered while undefined (still once per tag per process).
+  while the pass was running too. The wait is configurable (`lazyDefinitionWaitMs`), only happens for tags this
+  render rendered while undefined (still once per tag per process) and never goes beyond the render's deadline.
 * Attribute reactions: connected elements get `attributeChangedCallback` for observed attributes their own code
   changes (`setAttribute` / `removeAttribute`, and `toggleAttribute` through them), as in browsers; the shim's
   `Element` only stores the attribute. Without it `field-label/src/FieldLabel.js` (sets its generated `id` attribute in
@@ -390,13 +391,15 @@ unit test that fails on 0.1.0 and passes now. The catalog output is unchanged ap
   `<sp-tooltip>` (its shadow renders `sp-tooltip-openable`) are no longer keyed in the tooltip's scope, get no
   `__host` = tooltip, and no `defer-hydration` / `<!--lit-node-->` they should not have (upstream has the same bug).
 * L6 (timer overflow; `overflow.ts`): `timerDelay` (context.ts): delays above 2^31 - 1 ms mean "no timer"
-  (`timeoutMs`: no deadline; `lazyDefinitionWaitMs`: wait until defined, bounded by the render deadline).
+  (`timeoutMs`: no deadline; `lazyDefinitionWaitMs`: wait until defined, bounded by the render deadline; 0.1.2
+  made that bound real, see "Third review").
 * L7 (document templates and `lang`): from pass 2 on, a whole-document template's own `<html lang>` (pass-1 tree,
   `ServerTree.documentLanguage`) is the document language when `options.lang` is not set (`setDocumentLanguage`).
 * L8 (light mutations in shadow scopes; `mutations.ts`): the recorded element's content (child tags, text; same
   format as `lightSignature`) is part of its signature. The element at the recorded path is used when signature and
   content match; otherwise the one element with both, or the only element with the signature; several candidates
-  and not exactly one with the content: warning, not applied.
+  and not exactly one with the content: warning, not applied (0.1.2: unless the scope kept its structure, see
+  "Third review").
 * L9 (`MatchMediaController` adapter by tag): applies to every hydrating element and acts only on elements that have
   controllers (`findMatchMediaControllers`), so subclasses under other tags are pinned too.
 * L10 (deterministic 4-byte requests): documented (API.md "Deterministic ids, caveat"); no code change - restricting
@@ -407,6 +410,57 @@ unit test that fails on 0.1.0 and passes now. The catalog output is unchanged ap
   `REPLACE_WITH_OWNER` placeholders stay for the owner.
 * L12 (demo): `HEAD /dist/*` goes to `express.static` (Content-Type, Content-Length, 404); other HEAD requests keep
   the empty 200 health-check answer (`tests/server.spec.ts`).
+
+### Third review (0.1.2)
+
+A third reviewer checked 0.1.1 and reproduced four problems with probes (`.probe/review2/`: `l8.ts`, `lazy-inf.ts`,
+`m3.ts` WHICH=a|b, `options-count.ts`; `base/` is a d7d001b copy). Each fix has a unit test that fails on 0.1.1 and
+passes now (122 unit tests). Full catalog: HTML and reports identical to 0.1.1 (`.probe/review3/snap.ts` +
+`.probe/review2/cmp.mjs`, ids normalized), render times unchanged (`.probe/review3/timing.ts`, alternating runs: baseline and
+0.1.2 both 2.9-5.0 s on a loaded machine; `verifyAdoptions` 3-9 ms per pass), heap flat at 111-112 MB from render 2
+(`.probe/leak.ts`, N=8), `.probe/review/key-shift.ts` unchanged (passes 3, findings
+59, 0 shifts).
+
+* Light mutations, regression of the 0.1.1 content check (`l8.ts`): with two or more same-signature elements in a
+  scope whose content changed between the passes (headings rendered from state the host only knows from pass 2 on:
+  `<h2 slot="heading">First (${state})</h2>` twice), none had the recorded content, so 0.1.1 dropped the ids with a
+  "2 elements match and none has the recorded content" warning while the hosts' `aria-labelledby` pointed at them
+  (dangling references; d7d001b applied them). The element at the recorded position is used again when it has the
+  signature and the scope's structure along its path is unchanged (same tags at every level, `sameStructure`); a
+  debug note, no warning. A redirect away from the recorded position still needs exactly one other element with the
+  recorded content; a scope whose structure changed (`x-mark-ambiguous`: one span became two) still warns.
+* Lazy definitions with `lazyDefinitionWaitMs: Infinity` (`lazy-inf.ts`): 0.1.1 raced the definitions against
+  nothing, so a tag never defined on the server (a client-only element in a component's `render()`) made every render
+  wait until `timeoutMs` and reject ("pass 1 did not complete": pass 1 was recorded only after the wait), the tag was
+  never given up, and the pending wait kept each render reachable. Now: pass 1 is recorded before the wait; the wait
+  is bounded by the render's deadline (`RenderSession.deadlineAt` / `signal`, aborted with the render, so a wait
+  that reaches the deadline is ended by the deadline itself, not by a timer that fires just before it); tags still
+  undefined are added to `abandonedTags` whenever the wait ends (definitions, timer or deadline). Decision:
+  `Infinity` means "up to the render's deadline" (that render returns its pass-1 output with a
+  `the wait for lazily defined elements (<tag>) was abandoned` warning; later renders do not wait); without a deadline
+  (`timeoutMs` 0 / Infinity) `Infinity` means the default 250 ms, because an unbounded wait for a client-only tag would
+  never end. Probe: 3 x ~410 ms rejections -> 427 ms (pass-1 output + warning), then 23 / 16 ms with 2 passes.
+* Adoption verification by bound values (`m3.ts` WHICH=a): same-kind elements told apart only by bound attributes /
+  properties (`<x-leaf-a label=${'extra'}>` rendered before `<x-leaf-a label=${'main'}>` once the host knows its
+  light DOM; empty light DOM) still swapped instances (the extra one rendered `derived-from-main`). `verifyAdoptions`
+  now has a second criterion: the attributes and properties upstream set (`ElementRecord.attributes` /
+  `properties`; static ones are equal within a key group; property values compared with `sameValue` after
+  translating previous-pass instances), skipped when the light DOM alone identifies the element (same light DOM as
+  its source, unique in the group - e.g. tabs with distinct labels whose bound `selected` moved). Warning
+  `adopted candidate rejected: upstream attributes / properties differ ...`, corrected by the extra pass.
+  Values created anew per render (object literals, closures) never compare equal, so they never confirm another
+  candidate (no rejection). Known limitation: elements with no light DOM that differ only by a bound value moving
+  from one to another between the passes look like a reorder (third pass + warning).
+* Adoption verification false positive (`m3.ts` WHICH=b): `<x-leaf-b>${known ? 'B' : 'A'}</x-leaf-b><x-leaf-b>A</x-leaf-b>`
+  got a spurious rejection and a third pass, because the sibling had the first element's old light DOM. `misadopted`
+  (plan.ts) now counts only a current element like the adopted source whose own adoption is mismatched or missing,
+  and only a previous element like this one that no like current element adopted (for both criteria). Probe: 2
+  passes, clean (as d7d001b).
+* `renderOptions` of `disableSsr` elements (`options-count.ts`): evaluated 3 times over 2 passes (pass 1, the
+  discarded pre-built instance in `createInstance`, again on the element the renderer builds). `TreeRealm` keeps the
+  decision per tree node (`ssrDisabled` map) and `renderOptionsOf(element, node)` hands it to the renderer for the
+  element it builds for that node: `{"off":2,"normal":2}`. The decision is made on an instance with the previous
+  pass's attributes, as for every pre-built element, and matches the plain facade other elements saw.
 
 ### Process-wide state
 

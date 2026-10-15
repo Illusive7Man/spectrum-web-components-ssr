@@ -149,6 +149,12 @@ export class RenderSession {
   ended = false;
   /** Set when the render's deadline passed: the remaining work stops at its next step. */
   aborted = false;
+  /** `performance.now()` time of the render's deadline (`timeoutMs`); undefined: the render has no deadline. */
+  deadlineAt: number | undefined;
+  /** Aborted with the render (`abort()`): ends waits that are not steps of the render's work (lazy definitions). */
+  private readonly abortController = new AbortController();
+  /** The tags pass 1 waits for while it waits for lazily imported definitions (for the deadline warning). */
+  waitingForDefinitions: readonly string[] | undefined;
   /**
    * The `lang` of the template's own `<html>` element (whole-document templates, read from the pass-1 tree; see
    * `setDocumentLanguage`). Used as the document language from pass 2 on when `options.lang` is not set.
@@ -174,6 +180,22 @@ export class RenderSession {
     if (this.aborted) {
       throw new RenderAbortedError();
     }
+  }
+
+  /** The render's deadline passed: its remaining work stops at its next step, pending waits end now. */
+  abort(): void {
+    this.aborted = true;
+    this.abortController.abort();
+  }
+
+  /** Aborted when the render's deadline passes. */
+  get signal(): AbortSignal {
+    return this.abortController.signal;
+  }
+
+  /** Milliseconds left until the render's deadline (at least 0); undefined when the render has no deadline. */
+  remainingMs(): number | undefined {
+    return this.deadlineAt === undefined ? undefined : Math.max(0, this.deadlineAt - performance.now());
   }
 }
 

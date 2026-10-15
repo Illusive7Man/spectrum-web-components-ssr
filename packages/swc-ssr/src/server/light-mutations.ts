@@ -17,12 +17,22 @@
  * that renders extra elements once it knows its light DOM), so the candidate must also carry the recorded node's
  * signature: same tag and the same identity attributes (`id`, `name`, `slot`, `type`, `role`, `part`, `for`,
  * `href`, `src`), compared before any change was applied, and the same content: child elements (tag, `slot`) and
- * text (`lightSignature` / `fingerprintOf`). When the element at the path does not match (or does not exist), the
- * one element of the scope with the signature (including `class`) and the content is used - or the only element
- * with the signature, whose content changed; when several elements have the signature and not exactly one of them
- * has the recorded content, the change is ambiguous: it is skipped and reported (`warn`), never applied to the
- * element that happens to be at the recorded position. Whole documents are parsed like the `ServerTree` parses them
- * (review M5: `parse()` instead of `parseFragment()`, which drops `<html>` / `<head>` / `<body>`).
+ * text (`lightSignature` / `fingerprintOf`). In order:
+ *
+ *  1. the element at the path, when it has the signature (including `class`) and the recorded content;
+ *  2. otherwise the one element of the scope with the signature and the recorded content (the scope was rendered
+ *     differently, e.g. a component rendered a same-signature element before the recorded one);
+ *  3. otherwise the only element of the scope with the signature (its content changed);
+ *  4. otherwise the element at the path, when it has the signature and the scope's structure along the path is
+ *     unchanged (the same tags at every level): the same element, only its content changed - e.g. headings whose
+ *     text a host renders from state it only knows from pass 2 on (third review: 0.1.1 dropped such changes when
+ *     several same-signature elements had changed content, leaving dangling `aria-labelledby` references);
+ *  5. otherwise the element at the path when only its `class` changed (no element has the full signature).
+ *
+ * Anything else (no element with the signature, or several of them in a scope whose structure changed and not
+ * exactly one with the recorded content) is ambiguous: it is skipped and reported (`warn`). Whole documents are
+ * parsed like the `ServerTree` parses them (review M5: `parse()` instead of `parseFragment()`, which drops `<html>`
+ * / `<head>` / `<body>`).
  */
 import {parse, parseFragment, type DefaultTreeAdapterMap} from 'parse5';
 import {
@@ -50,33 +60,57 @@ interface Location {
   host: TreeElementNode | null;
   /** Element-child indexes from the scope root. */
   path: number[];
+  /** The element children of every node along the path (scope root first, the node's parent last). */
+  levels: TreeElementNode[][];
 }
 
 /** Where `node` is: its tree scope and element-child path in it, or undefined (detached / plain template content). */
 function locate(node: TreeElementNode, tree: ServerTree): Location | undefined {
   const path: number[] = [];
+  const levels: TreeElementNode[][] = [];
   let current: TreeNode = node;
   for (;;) {
     const parent: TreeNode | null = current.parent;
     if (!parent) {
       return undefined;
     }
-    const siblings: TreeNode[] = (parent as {children: TreeNode[]}).children.filter((child) => isElementNode(child));
-    const index = siblings.indexOf(current);
+    const siblings: TreeElementNode[] = (parent as {children: TreeNode[]}).children.filter(isElementNode);
+    const index = siblings.indexOf(current as TreeElementNode);
     if (index === -1) {
       return undefined;
     }
     path.unshift(index);
+    levels.unshift(siblings);
     if (isDocumentNode(parent)) {
       // Shadow root content documents are detached from their template by the ServerTree.
       const host = tree.hostOf(parent);
       if (host) {
-        return {host, path};
+        return {host, path, levels};
       }
-      return parent.parent ? undefined : {host: null, path};
+      return parent.parent ? undefined : {host: null, path, levels};
     }
     current = parent;
   }
+}
+
+/**
+ * Whether the final output has the recorded scope's structure along the recorded path: at every level the same
+ * number of element children with the same tags. Then the element at the path is the recorded element even when
+ * its content (or that of same-signature elements elsewhere in the scope) changed between the passes.
+ */
+function sameStructure(location: Location, scope: P5Node): boolean {
+  let parent: P5Node | undefined = scope;
+  for (let level = 0; level < location.path.length; level++) {
+    const recorded = location.levels[level];
+    const current: P5Element[] = parent ? elementChildren(parent) : [];
+    const changed =
+      current.length !== recorded.length || recorded.some((element, index) => element.name !== current[index].tagName);
+    if (changed) {
+      return false;
+    }
+    parent = current[location.path[level]];
+  }
+  return true;
 }
 
 const isP5Element = (node: P5Node): node is P5Element => 'tagName' in node;
@@ -239,14 +273,16 @@ function describe(node: TreeElementNode, changes: Map<string, string | null>): s
 /**
  * Applies the recorded attribute changes to `html` (the output of the pass whose facades recorded them; markers
  * still present). `tree` is the tree the facades were built from; `hostId(host)` returns the final-pass marker id
- * of a shadow host of that tree. Changes that cannot be applied are reported through `warn`.
+ * of a shadow host of that tree. Changes that cannot be applied are reported through `warn`; `debug` gets notes
+ * about changes applied by position only (see the file comment, 4.).
  */
 export function applyLightMutations(
   html: string,
   mutations: LightMutations,
   tree: ServerTree,
   hostId: (host: TreeElementNode) => number | undefined,
-  warn: MutationWarning = () => {}
+  warn: MutationWarning = () => {},
+  debug: (message: string) => void = () => {}
 ): string {
   if (mutations.size === 0) {
     return html;
@@ -287,8 +323,8 @@ export function applyLightMutations(
       matchesIdentity(node, candidate) && matchesClass(node, candidate);
     const fingerprint = lightSignature(node);
     if (!element || !matchesSignature(element) || fingerprintOf(element) !== fingerprint) {
-      // The final pass rendered the scope differently, or the element at the recorded position has other content:
-      // look for the one element with the recorded signature (and content, when several have the signature).
+      // The final pass rendered the scope differently, or the element at the recorded position has other content
+      // (see the file comment for the order).
       let elements = scopes.get(scope);
       if (!elements) {
         elements = scopeElements(scope);
@@ -297,15 +333,23 @@ export function applyLightMutations(
       const sameSignature = elements.filter((candidate) => !claimed.has(candidate) && matchesSignature(candidate));
       const exact = sameSignature.filter((candidate) => fingerprintOf(candidate) === fingerprint);
       if (exact.length === 1) {
+        // Review finding (0.1.1): not the element at the recorded position with other content, e.g. one a component
+        // rendered before the recorded one in the final pass.
         element = exact[0];
       } else if (sameSignature.length === 1 && exact.length === 0) {
         // The only element with the signature, its content changed between the passes: still the recorded element.
         element = sameSignature[0];
+      } else if (element && matchesSignature(element) && sameStructure(location, scope)) {
+        // Third review (regression of 0.1.1): several same-signature elements whose content changed (e.g. headings
+        // rendered from state the host only knows from pass 2 on) in an unchanged scope: the element at the recorded
+        // position is the recorded element. 0.1.1 dropped the change (dangling `aria-labelledby` references).
+        debug(
+          `light-DOM attribute change applied at the recorded position (${sameSignature.length} same-signature ` +
+            `elements, ${exact.length} with the recorded content, scope structure unchanged): ${describe(node, changes)}`
+        );
       } else if (!(element && matchesIdentity(node, element) && sameSignature.length === 0)) {
         // (An element at the recorded position whose identity matches but whose class changed between the passes
-        // is still the recorded element; anything else is ambiguous or missing. Review finding (fixed): with several
-        // same-signature elements the change used to land on the one at the recorded position, whatever its content
-        // - e.g. on an element a component rendered before the recorded one in the final pass.)
+        // is still the recorded element; anything else is ambiguous or missing.)
         warn(
           `light-DOM attribute change not applied: ${
             sameSignature.length > 1

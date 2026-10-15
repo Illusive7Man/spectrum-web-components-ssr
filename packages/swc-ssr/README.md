@@ -78,7 +78,7 @@ element registry are process-wide.
 | `isManagedClass` | Spectrum classes | which classes get `lifecycle` by default. Other Lit elements keep upstream `@lit-labs/ssr` semantics. |
 | `elementRenderers` | none | extra `ElementRenderer`s tried before the Spectrum ones. |
 | `timeoutMs` | `10000` | deadline of one render; `0` or `Infinity` (or anything from 2^31 ms on) disables it. A render that does not settle returns its last completed pass plus a warning. |
-| `lazyDefinitionWaitMs` | `250` | how long to wait for definitions that components import lazily (`sp-slider` imports `sp-number-field` in `render()`); `0` disables the wait, `Infinity` waits until they are defined (within `timeoutMs`). |
+| `lazyDefinitionWaitMs` | `250` | how long to wait for definitions that components import lazily (`sp-slider` imports `sp-number-field` in `render()`), once per tag and process: tags still undefined when the wait ends are never waited for again. Never beyond `timeoutMs`. `0` disables the wait; `Infinity` waits up to the render's deadline (when it passes, that render returns its first-pass output with a warning; a client-only element that is never defined on the server costs this once per process). Without a deadline (`timeoutMs: 0`), `Infinity` means the default 250 ms. |
 | `deterministicIds` | `true` | Spectrum's `randomID()` ids are deterministic per render. `false` uses the CSPRNG for this render. Note: every plain `Uint8Array(4)` `getRandomValues` request made synchronously during a render gets deterministic bytes (the shape of `randomID()`'s request), also from your own template code; never use such bytes for secrets there, or turn this off. |
 | `debug` | `false` | keep the `data-swc-ssr` markers and log details. |
 

@@ -175,3 +175,85 @@ test('an element whose light DOM simply changed between the passes keeps its ado
   );
   assert.equal(report.passes, 2);
 });
+
+/* ------------------------------------------------------------------------------------------------------------ *
+ * Third review (medium): elements told apart only by bound attributes / properties, and a false positive
+ * ------------------------------------------------------------------------------------------------------------ */
+
+/** Derives its state from its `label` once, in firstUpdated (like a component reading its configuration). */
+class XLabelled extends SpectrumElement {
+  static override properties = {label: {reflect: true}, derived: {state: true}};
+  declare label: string;
+  declare derived: string;
+  constructor() {
+    super();
+    this.label = '';
+    this.derived = '?';
+  }
+  override firstUpdated() {
+    this.derived = `derived-from-${this.label}`;
+  }
+  override render() {
+    return html`<i id="derived">${this.derived}</i>`;
+  }
+}
+customElements.define('x-labelled', XLabelled);
+
+/** Once it knows its light DOM, renders an extra `<x-labelled>` first that differs only by a bound attribute. */
+class XLabelledHost extends XKeyHost {
+  override render() {
+    return html`${this.known ? html`<x-labelled label=${'extra'}></x-labelled>` : nothing}<x-labelled
+        label=${'main'}
+      ></x-labelled
+      ><slot></slot>`;
+  }
+}
+customElements.define('x-labelled-host', XLabelledHost);
+
+/** The first leaf's light DOM changes ('A' -> 'B') while its sibling keeps 'A': the same elements, new content. */
+class XEchoSibling extends XKeyHost {
+  override render() {
+    return html`<x-echo>${this.known ? 'B' : 'A'}</x-echo><x-echo>A</x-echo><slot></slot>`;
+  }
+}
+customElements.define('x-echo-sibling', XEchoSibling);
+
+test('an element told apart only by a bound attribute does not take over the instance of another one', async () => {
+  const {html: output, report} = await renderSpectrum(html`<x-labelled-host><p>light</p></x-labelled-host>`);
+  const host = findElement(parseHtml(output), (element) => element.name === 'x-labelled-host')!;
+  const leaves = [...walkElements(templateContent(shadowTemplateOf(host)!))].filter(
+    (element) => element.name === 'x-labelled'
+  );
+  const derivedOf = (leaf: any) =>
+    textOf(findElement(templateContent(shadowTemplateOf(leaf)!), (element) => element.attribs.id === 'derived')!).trim();
+  assert.deepEqual(
+    leaves.map((leaf) => [leaf.attribs.label, derivedOf(leaf)]),
+    [
+      ['extra', 'derived-from-extra'],
+      ['main', 'derived-from-main'],
+    ],
+    `every element renders the state derived from its own attributes:\n${formatReport(report)}`
+  );
+  assert.ok(
+    report.elements.some((element) =>
+      element.warnings.some((message) => message.includes('adopted candidate rejected: upstream attributes'))
+    ),
+    `the rejected adoption is reported:\n${formatReport(report)}`
+  );
+  assert.equal(report.passes, 3, 'another pass is made with the corrected ordinals');
+});
+
+test('an element whose light DOM changed keeps its adoption although a sibling has its previous content', async () => {
+  const {html: output, report} = await renderSpectrum(html`<x-echo-sibling><p>light</p></x-echo-sibling>`);
+  // (The first leaf's shadow still shows its pass-1 light DOM: the documented limitation of an element whose own
+  // light DOM changes between the passes, see DESIGN.md "Second review" M3; only the false rejection is fixed.)
+  assert.deepEqual(
+    echoes(output, 'x-echo-sibling').map((echo) => echo.light),
+    ['B', 'A']
+  );
+  assert.ok(
+    !report.elements.some((element) => element.warnings.some((message) => message.includes('adopted candidate rejected'))),
+    formatReport(report)
+  );
+  assert.equal(report.passes, 2, 'no extra pass');
+});

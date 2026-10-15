@@ -275,11 +275,37 @@ interface RenderProgress {
 }
 
 /**
- * Resolves true when `work` settles in time, false at the deadline (`work` keeps running; its result is ignored).
- * No deadline for 0, negative values, NaN, Infinity and anything beyond the longest timer delay (`timerDelay`).
+ * The render's deadline as a timer delay: undefined (no deadline) for 0, negative values, NaN, Infinity and anything
+ * beyond the longest timer delay (`timerDelay`).
  */
-function withDeadline(work: Promise<void>, timeoutMs: number): Promise<boolean> {
-  const delay = timeoutMs > 0 ? timerDelay(timeoutMs) : undefined;
+function deadlineDelay(timeoutMs: number): number | undefined {
+  return timeoutMs > 0 ? timerDelay(timeoutMs) : undefined;
+}
+
+/**
+ * How long pass 1 may wait for lazily imported definitions (`lazyDefinitionWaitMs`), in ms; `Infinity`: until the
+ * render's deadline, which then ends the wait (`session.signal`) and the render (pass-1 output). `Infinity` (and
+ * anything beyond the longest timer delay) as option means "up to the render's deadline"; a render without a
+ * deadline waits the default instead - an unbounded wait for a tag that is never defined on the server (a
+ * client-only element) would never end (third review).
+ */
+function lazyDefinitionWait(session: RenderSession): number {
+  const configured = session.options.lazyDefinitionWaitMs ?? LAZY_DEFINITION_WAIT_MS;
+  if (!(configured > 0)) {
+    return 0;
+  }
+  const unbounded = timerDelay(configured) === undefined;
+  const remaining = session.remainingMs();
+  if (remaining === undefined) {
+    return unbounded ? LAZY_DEFINITION_WAIT_MS : configured;
+  }
+  // A wait that reaches the deadline is ended by the deadline itself (not by a timer of its own that could fire
+  // just before it and start a pass that is abandoned at once).
+  return unbounded || configured >= remaining ? Infinity : configured;
+}
+
+/** Resolves true when `work` settles in time, false at the deadline (`work` keeps running; its result is ignored). */
+function withDeadline(work: Promise<void>, delay: number | undefined): Promise<boolean> {
   if (delay === undefined) {
     return work.then(() => true);
   }
@@ -315,10 +341,23 @@ async function runPasses(value: unknown, session: RenderSession, progress: Rende
     runInContext(first, () => renderThunked(value, first.renderInfo(renderers))),
     first
   );
+  // Recorded before any wait: when the deadline passes while waiting, the render falls back to this output
+  // (third review: it used to reject with 'pass 1 did not complete').
+  progress.passes.push(first);
+  progress.html = html;
   // Components that import what they render lazily (e.g. sp-slider -> sp-number-field) rendered those elements
   // as plain tags; if their definitions arrive shortly, collect the structure again with them. Only tags that were
-  // undefined when rendered are waited for, each at most once per process (review M6: configurable).
-  if (await awaitLazyDefinitions(session, options.lazyDefinitionWaitMs ?? LAZY_DEFINITION_WAIT_MS)) {
+  // undefined when rendered are waited for, each at most once per process (review M6: configurable), never beyond
+  // the render's deadline.
+  const repeat = await awaitLazyDefinitions(session, {
+    waitMs: lazyDefinitionWait(session),
+    signal: session.signal,
+    onWait: (tags) => {
+      session.waitingForDefinitions = tags;
+    },
+  });
+  session.waitingForDefinitions = undefined;
+  if (repeat) {
     session.checkAborted();
     session.debug('pass 1 repeated: lazily imported definitions arrived');
     first = newContext(session, 1);
@@ -326,9 +365,9 @@ async function runPasses(value: unknown, session: RenderSession, progress: Rende
       runInContext(first, () => renderThunked(value, first.renderInfo(renderers))),
       first
     );
+    progress.passes[0] = first;
+    progress.html = html;
   }
-  progress.passes.push(first);
-  progress.html = html;
   session.debug(`pass 1: ${first.records.size} elements, ${html.length} chars`);
 
   // Pass 2 (and possibly 3): render with the light-DOM / shadow information of the previous pass.
@@ -397,22 +436,29 @@ async function renderSession(value: unknown, session: RenderSession): Promise<Re
   const progress: RenderProgress = {passes: [], html: undefined, created: []};
   try {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const delay = deadlineDelay(timeoutMs);
+    session.deadlineAt = delay === undefined ? undefined : performance.now() + delay;
     const work = runPasses(value, session, progress);
-    const settled = await withDeadline(work, timeoutMs);
+    const settled = await withDeadline(work, delay);
     // A snapshot: abandoned work could otherwise still add a pass.
     const passes = [...progress.passes];
     let html = progress.html;
     if (!settled) {
       // Review M6: the render did not settle in time (e.g. a template awaits a promise that never settles). Its
-      // remaining work stops at its next step; the output of the last completed pass is used.
-      session.aborted = true;
+      // remaining work stops at its next step (a wait for lazy definitions ends now); the output of the last
+      // completed pass is used.
+      const waitingFor = session.waitingForDefinitions;
+      session.abort();
       const abandoned = session.pass;
       if (passes.length === 0 || html === undefined) {
         throw new Error(`renderSpectrum: the render did not settle within ${timeoutMs} ms (pass 1 did not complete)`);
       }
       session.orphanWarnings.push(
-        `the render did not settle within ${timeoutMs} ms: pass ${abandoned} was abandoned, ` +
-          `the output of pass ${passes[passes.length - 1].pass} is used`
+        `the render did not settle within ${timeoutMs} ms: ` +
+          (waitingFor
+            ? `the wait for lazily defined elements (${waitingFor.map((tag) => `<${tag}>`).join(', ')}) was abandoned`
+            : `pass ${abandoned} was abandoned`) +
+          `, the output of pass ${passes[passes.length - 1].pass} is used`
       );
     }
     const last = passes[passes.length - 1];
@@ -432,7 +478,8 @@ async function renderSession(value: unknown, session: RenderSession): Promise<Re
             const instance = host ? realm.facadeOf(host) : undefined;
             const report = instance ? last.reportOfInstance(instance) : undefined;
             (report ? report.warnings : session.orphanWarnings).push(message);
-          }
+          },
+          (message) => session.debug(message)
         );
       } catch (error) {
         session.orphanWarnings.push(`could not apply light-DOM attribute changes: ${errorMessage(error)}`);
