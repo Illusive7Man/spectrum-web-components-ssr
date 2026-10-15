@@ -131,9 +131,10 @@ test('catalog: sizes and timing of trimmed and minified renders', (t) => {
     );
   }
   assert.equal(a.fullBytes, b.fullBytes);
-  // Measured 69.6% (trimmed) and 37.9% (minified + --mod-) with @spectrum-web-components 1.12.4. 0.2.0 renamed more
+  // Measured 69.6% (trimmed) and 38.3% (minified + --mod-) with @spectrum-web-components 1.12.4. 0.2.0 renamed more
   // (23.9%, budget 30%): since 0.2.1 the minifier keeps Spectrum's public --system-* / --highcontrast-* / --mod-* names
-  // and the names one element class defines for another (docs/API.md "Styles"), which costs 14 points here.
+  // and the names one element class defines for another (docs/API.md "Styles"), which costs 14 points here; since
+  // 0.2.2 also the names other classes' complete stylesheets use (37.9 -> 38.3 %).
   assert.ok(a.trimmedBytes < 0.75 * a.fullBytes, `trimmed keeps ${a.trimmedBytes} of ${a.fullBytes}`);
   assert.ok(b.trimmedBytes < 0.42 * b.fullBytes, `minified keeps ${b.trimmedBytes} of ${b.fullBytes}`);
   // Trimming (warm: the second render) is a small part of the render (robust against machine load, unlike
@@ -258,4 +259,101 @@ test('catalog (0.2.1, M1 / M2): every renamed name a component reads is defined 
   const after = publicNames(minified.html);
   assert.ok(before.size > 500, `${before.size} --system-* / --highcontrast-* names on the trimmed page`);
   assert.deepEqual([...before].filter((name) => !after.has(name)).slice(0, 20), []);
+});
+
+test('catalog (0.2.2): every renamed name is owned in the COMPLETE stylesheets too (what the client restores)', () => {
+  // The client restores an element's complete `elementStyles` (original names). A name the trimmed texts showed in one
+  // element class only can still be read by a rule the trimmer dropped from another class's sheet (sp-menu ->
+  // sp-menu-item's disabled icon colour): with the defining parent defined late, the restored child reads the original
+  // name while the parent's minified CSS defines only the short one. 0.2.1 renamed 48 such names on the catalog.
+  const trimmedRoots = hostStyles(trimmed.html);
+  const minifiedRoots = hostStyles(minified.html);
+  assert.equal(minifiedRoots.length, trimmedRoots.length, 'the same shadow roots in both renders');
+  // Short -> original, token by token. `minifiedOptions` also collapses undefined `--mod-*` references
+  // (undefinedPrefixes): such a token is missing from the minified text, and `--mod-*` names are never renamed.
+  const TOKEN = /(?<![\w-])--[\w-]+/g;
+  const originals = new Map<string, string>();
+  const inconsistent = new Set<string>();
+  let misaligned = 0;
+  minifiedRoots.forEach((root, index) => {
+    const before = trimmedRoots[index]!;
+    assert.equal(root.tag, before.tag);
+    if (root.tag === 'sp-theme') {
+      return; // the theme closure may differ with collapsed references; its names are judged by definition below
+    }
+    const a = before.text.match(TOKEN) ?? [];
+    const b = root.text.match(TOKEN) ?? [];
+    let i = 0;
+    let j = 0;
+    while (i < a.length && j < b.length) {
+      if (a[i] === b[j]) {
+        i++;
+        j++;
+      } else if (a[i]!.startsWith('--mod-')) {
+        i++;
+      } else {
+        const previous = originals.get(b[j]!);
+        if (previous !== undefined && previous !== a[i]) {
+          inconsistent.add(b[j]!);
+        }
+        originals.set(b[j]!, a[i]!);
+        i++;
+        j++;
+      }
+    }
+    if (j < b.length || a.slice(i).some((token) => !token.startsWith('--mod-'))) {
+      misaligned++;
+    }
+  });
+  assert.equal(misaligned, 0, 'minified texts align with the trimmed texts token by token');
+  assert.deepEqual([...inconsistent], []);
+  assert.ok(originals.size > 1000, `${originals.size} renamed names`);
+
+  const themeDefines = new Set<string>();
+  for (const {tag, text} of minifiedRoots) {
+    if (tag === 'sp-theme') {
+      addDefinitions(text, themeDefines);
+    }
+  }
+  // Complete stylesheets of every element class on the page, per stylesheet object (shared objects count once).
+  const registry = (globalThis as {customElements?: {get(tag: string): unknown}}).customElements!;
+  const mentionedBy = new Map<string, {classes: Set<string>; sheets: Set<unknown>}>();
+  const definedByClass = new Set<string>();
+  for (const tag of new Set(minifiedRoots.map((root) => root.tag))) {
+    if (tag === 'sp-theme') {
+      continue;
+    }
+    const styles = (registry.get(tag) as {elementStyles?: Array<{cssText?: string}>} | undefined)?.elementStyles ?? [];
+    for (const style of styles) {
+      const text = style.cssText ?? '';
+      for (const match of text.matchAll(TOKEN)) {
+        let entry = mentionedBy.get(match[0]);
+        if (!entry) {
+          entry = {classes: new Set(), sheets: new Set()};
+          mentionedBy.set(match[0], entry);
+        }
+        entry.classes.add(tag);
+        entry.sheets.add(style);
+      }
+      addDefinitions(text, definedByClass);
+    }
+  }
+  const foreign: string[] = [];
+  let themeOwned = 0;
+  for (const [short, original] of originals) {
+    if (themeDefines.has(short)) {
+      themeOwned++;
+      // Theme-owned: no element class may define the name (it would override the theme under the original name).
+      if (definedByClass.has(original)) {
+        foreign.push(`${original} (${short}): theme name an element class's complete sheet defines`);
+      }
+      continue;
+    }
+    const users = mentionedBy.get(original);
+    if (users && users.classes.size > 1 && users.sheets.size > 1) {
+      foreign.push(`${original} (${short}): complete sheets of ${[...users.classes].join(', ')}`);
+    }
+  }
+  assert.ok(themeOwned > 500, `${themeOwned} theme-owned renamed names`);
+  assert.deepEqual(foreign.slice(0, 20), [], `${foreign.length} renamed names other classes' complete sheets use`);
 });

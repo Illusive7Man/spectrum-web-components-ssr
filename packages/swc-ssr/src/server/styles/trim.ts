@@ -12,10 +12,14 @@
  *  4. `trimTheme`: theme custom properties are kept only when used - transitively through the theme's own
  *     definitions - by a kept rule of a component stylesheet, a non-custom-property declaration or nested rule of
  *     the theme, a `style` attribute, another `<style>` of the output, or `references`.
- *  5. `minifyCustomProperties`: see `minify()` (only names the client can switch at once; never Spectrum's public
- *     `--mod-*` / `--highcontrast-*` / `--system-*`).
+ *  5. `minifyCustomProperties`: see `minify()` (only names the client can switch at once, judged on the trimmed texts
+ *     and on the complete stylesheets of the page's element classes; never Spectrum's public `--mod-*` /
+ *     `--highcontrast-*` / `--system-*`).
  *  6. Every token is replaced by its stylesheet's text: all instances of a stylesheet get the same text. A `<style>`
  *     whose text changed gets `data-swc-styles="trimmed"` / `"minified"` (`STYLE_MARKER_ATTRIBUTE`, collector.ts).
+ *     With `dedupe: 'link'` (0.3.0, dedupe.ts) a token becomes a `<link data-swc-styles>` to its text in the
+ *     `styleSheetStore` instead (unless the text stays inline, `linkable()`); `full` mode with `dedupe: 'link'` skips
+ *     steps 1-5 (every text is the complete one).
  *
  * Parsed stylesheets (structure, declaration blocks, compiled selectors) are cached process-wide per stylesheet
  * object (`WeakMap`); everything else lives only for one call.
@@ -44,12 +48,21 @@ import {
   type StyleMarker,
 } from './collector.js';
 import {compileSelectorList, Instance, listMayMatch, type ComplexMatcher} from './selector-match.js';
+import {hasRelativeUrl, INLINE_BELOW_BYTES, Linker, setStyleHead} from './dedupe.js';
 
 interface ParsedSheet {
   text: string;
   nodes: CssNode[];
   selectors: Map<StyleRuleNode, ComplexMatcher[] | undefined>;
   bodies: Map<StyleRuleNode, BlockItem[]>;
+  /** Custom-property names of the complete text (`minify()`), computed once. */
+  names?: SheetNames;
+}
+
+/** Every custom-property name a stylesheet text mentions, and the ones it defines. */
+interface SheetNames {
+  mentions: Set<string>;
+  definitions: Set<string>;
 }
 
 const parsedByStyle = new WeakMap<object, ParsedSheet>();
@@ -206,6 +219,18 @@ function addNames(text: string, into: Set<string>): void {
   }
 }
 
+/** Names of a stylesheet's complete text (cached with its parse, so once per stylesheet object and process). */
+function completeNamesOf(parsed: ParsedSheet): SheetNames {
+  if (!parsed.names) {
+    const mentions = new Set<string>();
+    const definitions = new Set<string>();
+    addNames(parsed.text, mentions);
+    addDefinitions(parsed.text, definitions);
+    parsed.names = {mentions, definitions};
+  }
+  return parsed.names;
+}
+
 function shortName(index: number): string {
   let name = '';
   let n = index;
@@ -327,7 +352,7 @@ export function resolveStyles(html: string, collector: StyleCollector): Resolved
       }
     }
     if (trimmed.length > 0) {
-      transform(trimmed, styleAttributes, otherCss, options);
+      transform(trimmed, [...states.values()], styleAttributes, otherCss, options);
     }
   }
 
@@ -396,6 +421,7 @@ function substitute(html: string, states: Map<number, SheetState>, collector: St
 /** Steps 3-5 of the file comment over the stylesheets whose rules were selected; sets `state.text`. */
 function transform(
   trimmed: SheetState[],
+  page: SheetState[],
   styleAttributes: string[],
   otherCss: string[],
   options: NormalizedStyleOptions
@@ -608,7 +634,7 @@ function transform(
   }
 
   if (options.minifyCustomProperties) {
-    minify(trimmed, styleAttributes, otherCss, options);
+    minify(trimmed, page, styleAttributes, otherCss, options);
   }
 }
 
@@ -659,17 +685,17 @@ export const PUBLIC_CUSTOM_PROPERTY_PREFIXES: readonly string[] = ['--mod-', '--
 
 const isPublicName = (name: string): boolean => PUBLIC_CUSTOM_PROPERTY_PREFIXES.some((prefix) => name.startsWith(prefix));
 
-/** Owners of a trimmed stylesheet for `minify()`: the theme (every fragment, bridged as one), or its element class and its stylesheet object. */
+/** Owners of a stylesheet for `minify()`: the theme (every fragment, bridged as one), or its element class and its stylesheet object. */
 const THEME_GROUP = '#theme'; // never an element tag
-const classGroupOf = (state: SheetState): string => (state.entry.theme ? THEME_GROUP : state.entry.tag);
+const classGroupOf = (entry: SheetEntry): string => (entry.theme ? THEME_GROUP : entry.tag);
 
 /** Identity of a stylesheet across element classes (one `CSSResult` in the `elementStyles` of several classes). */
-function sheetGroupOf(state: SheetState, ids: Map<unknown, string>): string {
-  if (state.entry.theme) {
+function sheetGroupOf(entry: SheetEntry, ids: Map<unknown, string>): string {
+  if (entry.theme) {
     return THEME_GROUP;
   }
-  const style = state.entry.style;
-  const key = style !== null && (typeof style === 'object' || typeof style === 'function') ? style : `text:${state.entry.cssText}`;
+  const style = entry.style;
+  const key = style !== null && (typeof style === 'object' || typeof style === 'function') ? style : `text:${entry.cssText}`;
   let id = ids.get(key);
   if (id === undefined) {
     id = `#sheet${ids.size}`;
@@ -696,13 +722,29 @@ function sheetGroupOf(state: SheetState, ids: Map<unknown, string>): string {
  * restored element's minified `<style>` until no element runs on minified CSS: the two together cover inheritance
  * between nested instances.)
  *
+ * Owners are judged from the trimmed texts AND from the complete stylesheets of every element class on the page
+ * (0.2.2): the client restores complete sheets, so a name only the parent's trimmed text mentions may still be read
+ * by a rule the trimmer dropped from the child's sheet (`sp-menu` -> `sp-menu-item`'s disabled icon colour,
+ * `sp-breadcrumbs` -> `sp-breadcrumb-item`, `sp-table` -> its head cells and rows, `sp-search` -> the textfield
+ * family): with the parent defined late, the restored child would read the original name while the parent's
+ * minified CSS defines only the short one. A name an element class's complete sheet defines is not "defined by the
+ * theme only" either (the restored class would override it for its children under the original name, while minified
+ * children read the short name from the theme). The classes are those with a shadow root in the output, also when
+ * their sheets stayed complete; not the server registry (output must not depend on what other renders defined).
+ *
  * Never renamed either: `PUBLIC_CUSTOM_PROPERTY_PREFIXES`, names in `references`, names that occur in `style`
  * attributes or in CSS the trimmer does not control (other `<style>` elements, complete stylesheets), and names only
  * referenced (`var(--x)` without a definition on the page: the application may define them). Short names skip every
  * name that occurs anywhere on the page and every `references` name or prefix (custom properties of the
  * application's own stylesheets, which the server cannot see otherwise).
  */
-function minify(trimmed: SheetState[], styleAttributes: string[], otherCss: string[], options: NormalizedStyleOptions): void {
+function minify(
+  trimmed: SheetState[],
+  page: SheetState[],
+  styleAttributes: string[],
+  otherCss: string[],
+  options: NormalizedStyleOptions,
+): void {
   const excluded = new Set<string>();
   for (const text of styleAttributes) {
     addNames(text, excluded);
@@ -726,8 +768,8 @@ function minify(trimmed: SheetState[], styleAttributes: string[], otherCss: stri
     }
   };
   for (const state of trimmed) {
-    const classGroup = classGroupOf(state);
-    const sheetGroup = sheetGroupOf(state, sheetIds);
+    const classGroup = classGroupOf(state.entry);
+    const sheetGroup = sheetGroupOf(state.entry, sheetIds);
     const definitions = new Set<string>();
     addDefinitions(state.text, definitions);
     for (const name of definitions) {
@@ -741,10 +783,30 @@ function minify(trimmed: SheetState[], styleAttributes: string[], otherCss: stri
       note(sheetsUsing, match[0], sheetGroup);
     }
   }
+  // What the client restores: the complete stylesheets of every element class on the page (see above). Their names
+  // also stay off the short names (a restored sheet must not define a short name minified elements read). Their
+  // definitions only veto theme ownership: a name the trimmed texts only read stays "only read" (never renamed).
+  const classDefined = new Set<string>();
+  for (const state of page) {
+    if (state.entry.theme) {
+      continue;
+    }
+    const classGroup = classGroupOf(state.entry);
+    const sheetGroup = sheetGroupOf(state.entry, sheetIds);
+    const {mentions, definitions} = completeNamesOf(state.parsed);
+    for (const name of mentions) {
+      taken.add(name);
+      note(classesUsing, name, classGroup);
+      note(sheetsUsing, name, sheetGroup);
+    }
+    for (const name of definitions) {
+      classDefined.add(name);
+    }
+  }
   const owned = (name: string): boolean => {
     const definers = definedBy.get(name)!;
     if (definers.has(THEME_GROUP)) {
-      return definers.size === 1;
+      return definers.size === 1 && !classDefined.has(name);
     }
     return classesUsing.get(name)?.size === 1 || sheetsUsing.get(name)?.size === 1;
   };

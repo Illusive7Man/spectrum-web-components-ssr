@@ -8,7 +8,14 @@ import {hydrate} from '@lit-labs/ssr-client';
 import {render} from 'lit-html';
 import {hydrateShadowRoots} from '@webcomponents/template-shadowroot';
 import {installHydrationHooks} from './hooks.js';
-import {bridgeServerThemes, releaseServerStyles, setRemoveServerStyles, settleThemeBridges} from './server-styles.js';
+import {
+  bridgeServerThemes,
+  pendingTrimmedThemes,
+  releaseServerStyles,
+  setRemoveServerStyles,
+  settleThemeBridges,
+  THEME_PENDING_WARNING,
+} from './server-styles.js';
 import {DEFER_ATTRIBUTE, isHydrationCandidate, tagsToDefine} from './elements.js';
 
 export {registerHydrationAdapter} from './hooks.js';
@@ -28,7 +35,12 @@ export interface HydrationReport {
    * includes what was captured between loading this module and the `hydrateSpectrum()` call).
    */
   errors: string[];
-  /** console.warn output captured while hydrating (plus hydration-helper warnings such as undefined tags). */
+  /**
+   * console.warn output captured while hydrating, plus the helper's own warnings: tags not defined in time, updates
+   * that did not settle, and `theme pending: sp-theme not defined; trimmed/minified theme values incomplete (...)`
+   * when the call ends while an `<sp-theme>` whose server CSS was trimmed or minified has not upgraded (docs/API.md
+   * "Styles").
+   */
   warnings: string[];
   /** Tag name of every element that still carries `defer-hydration` once hydration has settled (one entry per element). */
   deferred: string[];
@@ -507,6 +519,16 @@ export async function hydrateSpectrum(
     // Trimmed / minified server CSS: the server's <sp-theme> styles are kept while marked <style>s are left (elements
     // not hydrated yet); once none is left anywhere in the document, they go.
     settleThemeBridges();
+    // A theme still on its trimmed / minified server <style> (`sp-theme` not defined): only what the server kept.
+    const pendingThemes = pendingTrimmedThemes();
+    if (pendingThemes > 0) {
+      pushUnique(
+        report.warnings,
+        `${THEME_PENDING_WARNING} (${pendingThemes} <sp-theme> ${pendingThemes === 1 ? 'element runs' : 'elements run'} ` +
+          "on the server's theme <style>: content created on the client and states entered later lack the theme " +
+          'values the server left out until sp-theme is defined)',
+      );
+    }
   } catch (error) {
     reportFailure(report, 'hydrateSpectrum() failed', error);
   } finally {

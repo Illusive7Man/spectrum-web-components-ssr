@@ -4,8 +4,13 @@ import {fileURLToPath} from 'node:url';
 import type {TestInfo} from '@playwright/test';
 
 /**
- * Shared results store. Every check appends one JSON line to `tests/results/raw.jsonl`, so that
- * `tests/results/summary.md` can be produced by the global teardown even when tests fail or time out.
+ * Shared results store. Every check appends one JSON line to the run's raw file, so that the summary can be produced
+ * by the global teardown even when tests fail or time out.
+ *
+ * A complete run uses `tests/results/raw.jsonl` and writes `tests/results/summary.md` (the support matrix). A narrowed
+ * run (`SWC_SSR_COMPONENTS` / `SWC_SSR_SMOKE`, see `narrowedBy`) must not replace that matrix with a partial table: it
+ * writes `tests/results/summary.partial.md`, from a raw file of its own (`raw.partial-<time>-<pid>.jsonl`, handed to the
+ * workers through `RAW_FILE_ENV` by the global setup), so that narrowed runs at the same time do not mix their records.
  */
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -15,6 +20,37 @@ export const SCREENSHOT_DIR = path.join(RESULTS_DIR, 'screenshots');
 export const FIDELITY_DIR = path.join(RESULTS_DIR, 'fidelity');
 export const RAW_FILE = path.join(RESULTS_DIR, 'raw.jsonl');
 export const SUMMARY_FILE = path.join(RESULTS_DIR, 'summary.md');
+/** Summary of a narrowed run (never `summary.md`). */
+export const PARTIAL_SUMMARY_FILE = path.join(RESULTS_DIR, 'summary.partial.md');
+/** The raw file of this run, when it is not `RAW_FILE`: set by the global setup, inherited by the workers. */
+export const RAW_FILE_ENV = 'SWC_SSR_RAW_FILE';
+const PARTIAL_RAW_PREFIX = 'raw.partial-';
+/** Raw files of narrowed runs older than this are deleted by the global setup of a later narrowed run. */
+const PARTIAL_RAW_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Why this run covers only part of the catalog (`SWC_SSR_COMPONENTS=...`, `SWC_SSR_SMOKE=...`), or undefined for a
+ * complete run. The same reading of the variables as tests/helpers/catalog.ts.
+ */
+export function narrowedBy(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const reasons: string[] = [];
+  const components = env.SWC_SSR_COMPONENTS;
+  if (components !== undefined && components.trim() !== '') reasons.push(`SWC_SSR_COMPONENTS=${components.trim()}`);
+  const smoke = env.SWC_SSR_SMOKE;
+  if (smoke !== undefined && smoke !== '' && smoke !== '0' && smoke.toLowerCase() !== 'false') reasons.push(`SWC_SSR_SMOKE=${smoke}`);
+  return reasons.length > 0 ? reasons.join(', ') : undefined;
+}
+
+/** The raw file records go to (and the teardown reads). */
+export function rawFile(): string {
+  const file = process.env[RAW_FILE_ENV];
+  return file !== undefined && file !== '' ? file : RAW_FILE;
+}
+
+/** Where the global teardown writes the summary of this run. */
+export function summaryFile(): string {
+  return narrowedBy() ? PARTIAL_SUMMARY_FILE : SUMMARY_FILE;
+}
 
 /**
  * `csr` is only recorded for whole pages (tests/all-components.spec.ts): the client-rendered reference page.
@@ -78,9 +114,33 @@ export function ensureResultDirs(): void {
   fs.mkdirSync(FIDELITY_DIR, {recursive: true});
 }
 
-export function resetResults(): void {
+/**
+ * Start of a run (global setup): a complete run clears `RAW_FILE`; a narrowed run gets a raw file of its own (published
+ * through `RAW_FILE_ENV` for the workers) and leaves `RAW_FILE` alone. Raw files of old narrowed runs are deleted.
+ * Returns the raw file of the run.
+ */
+export function resetResults(): string {
   ensureResultDirs();
-  fs.writeFileSync(RAW_FILE, '');
+  if (!narrowedBy()) {
+    delete process.env[RAW_FILE_ENV];
+    fs.writeFileSync(RAW_FILE, '');
+    return RAW_FILE;
+  }
+  const now = Date.now();
+  for (const name of fs.readdirSync(RESULTS_DIR)) {
+    if (!name.startsWith(PARTIAL_RAW_PREFIX)) continue;
+    const file = path.join(RESULTS_DIR, name);
+    try {
+      if (now - fs.statSync(file).mtimeMs > PARTIAL_RAW_MAX_AGE_MS) fs.rmSync(file, {force: true});
+    } catch {
+      /* removed by another run meanwhile */
+    }
+  }
+  const stamp = new Date(now).toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+  const file = path.join(RESULTS_DIR, `${PARTIAL_RAW_PREFIX}${stamp}-${process.pid}.jsonl`);
+  fs.writeFileSync(file, '');
+  process.env[RAW_FILE_ENV] = file;
+  return file;
 }
 
 export function recordResult(result: NewResult): void {
@@ -93,7 +153,7 @@ export function recordResult(result: NewResult): void {
     ...(result.note ? {note: result.note} : {}),
     at: new Date().toISOString(),
   };
-  fs.appendFileSync(RAW_FILE, JSON.stringify(record) + '\n');
+  fs.appendFileSync(rawFile(), JSON.stringify(record) + '\n');
   recordedInProcess.add(`${result.component}\u0000${result.check}`);
 }
 
@@ -105,7 +165,7 @@ export function wasRecorded(component: string, check: CheckName): boolean {
 export function readResults(): ResultRecord[] {
   let text = '';
   try {
-    text = fs.readFileSync(RAW_FILE, 'utf8');
+    text = fs.readFileSync(rawFile(), 'utf8');
   } catch {
     return [];
   }

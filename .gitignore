@@ -8,7 +8,10 @@ playwright-report/
 .DS_Store
 tests/results/screenshots/
 tests/results/fidelity/
+tests/results/styles/
 tests/results/raw.jsonl
+tests/results/raw.partial-*.jsonl
+tests/results/summary.partial.md
 .probe/
 .pack-check/
 packages/swc-ssr/package.json.orig

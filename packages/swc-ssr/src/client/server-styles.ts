@@ -44,6 +44,10 @@
  *    last marked `<style>` (confirmed by a scan of the document), or at the end of `hydrateSpectrum()` when none is
  *    left - but only from themes that have upgraded: the server `<style>` of a theme that has not (its definition
  *    loads late, or never) is all the theme has and stays where the server put it (its upgrade clears it anyway).
+ *  - `pendingTrimmedThemes()`, at the end of `hydrateSpectrum()` (0.2.2): such a theme defines only what the server
+ *    kept (`trimTheme`) under the names it chose (`minifyCustomProperties`), so content created on the client and
+ *    states entered later lack theme values until `sp-theme` is defined; `hydrateSpectrum()` reports it as a warning
+ *    (`THEME_PENDING_WARNING`). Nothing on the client can supply the complete theme without its definition.
  *
  * This module must not import `lit` / `lit-element` (see the file comment of hooks.ts): it only reads what the classes
  * and the DOM offer.
@@ -312,6 +316,37 @@ export function settleThemeBridges(): void {
   if ((bridges.length > 0 || kept.length > 0) && countPendingMarked() === 0) {
     dropBridges();
   }
+}
+
+/**
+ * `HydrationReport.warnings` entry (prefix) when `hydrateSpectrum()` ends while an `<sp-theme>` whose server CSS was
+ * trimmed or minified has not upgraded (see `pendingTrimmedThemes`).
+ */
+export const THEME_PENDING_WARNING = 'theme pending: sp-theme not defined; trimmed/minified theme values incomplete';
+
+/**
+ * Number of `<sp-theme>` elements (light DOM and open shadow roots) that have not upgraded - `sp-theme` is defined late,
+ * or never - while their declarative shadow root still holds a marked server `<style>`. Such a theme provides only
+ * what the server kept: the theme properties the server-rendered markup used (`trimTheme`), under the short names
+ * (`minifyCustomProperties`). Content created on the client (an `sp-table`'s checkbox cells, a pending button's
+ * progress circle, overlays), states entered later and restored elements reading names the server pruned or renamed
+ * find no theme values until `sp-theme` gets defined (its upgrade adopts the complete theme). 0 once `sp-theme` is
+ * defined (`define()` upgrades every connected instance), and on pages without trimmed server CSS (no scan then).
+ */
+export function pendingTrimmedThemes(): number {
+  if (!trimmedPage || typeof document === 'undefined' || typeof customElements === 'undefined') {
+    return 0;
+  }
+  if (customElements.get('sp-theme') !== undefined) {
+    return 0;
+  }
+  let pending = 0;
+  eachShadowRoot(document, (host, root) => {
+    if (isTheme(host) && !isUpgraded(host) && serverStyleElements(root).some(isMarked)) {
+      pending++;
+    }
+  });
+  return pending;
 }
 
 /**

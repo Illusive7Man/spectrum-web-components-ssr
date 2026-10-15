@@ -1,7 +1,8 @@
+import path from 'node:path';
 import type {CheckName, ResultRecord} from './results.ts';
 import {CLS_MAX, FLICKER_MAX} from './thresholds.ts';
 
-/** Pure markdown builder for `tests/results/summary.md` (the support matrix). */
+/** Pure markdown builder for `tests/results/summary.md` (the support matrix; `summary.partial.md` for narrowed runs). */
 
 export interface Row {
   component: string;
@@ -326,7 +327,9 @@ function stylesSection(rows: Row[], pageRow: Row | undefined): string[] {
       '`quiet`, select the first menu item / tab, set `invalid` on the first text field: every step equals the full-CSS page (0 px). ' +
       'Release = `removeServerStyles`: no `<style>` left in the sp-* shadow roots, and the hydrated paint equals the full-CSS page. ' +
       'Late = tests/styles-late.spec.ts, a definition held back until after hydration (`?late=<tag>`: sp-theme, sp-tab, sp-menu-item, ' +
-      'sp-table-cell): the trimmed / minified page equals the full-CSS page while it is missing and after it arrived (0 px). ' +
+      'sp-table-cell, and the parents sp-menu, sp-breadcrumbs, sp-table with a state change on their children while they are missing): ' +
+      'the trimmed / minified page equals the full-CSS page while it is missing and after it arrived (0 px; late sp-theme on the ' +
+      'table page: after it arrived, and the theme-pending warning is reported). ' +
       'App --mod- = an application stylesheet setting the `--mod-*` hooks of Spectrum: trimmed / minified equal full before and after hydration. ' +
       'No CSSOM = the client on its path for browsers without constructable stylesheets: held (theme upgraded, nothing hydrated) and hydrated equal full.',
   );
@@ -439,7 +442,14 @@ function stylesSection(rows: Row[], pageRow: Row | undefined): string[] {
   return lines;
 }
 
-export function buildSummary(records: ResultRecord[], now: Date = new Date()): string {
+export interface SummaryOptions {
+  /** The run covered only part of the catalog (`SWC_SSR_COMPONENTS=...`): stated at the top of the partial summary. */
+  narrowedBy?: string;
+  /** Raw results file of a narrowed run. */
+  rawFile?: string;
+}
+
+export function buildSummary(records: ResultRecord[], now: Date = new Date(), options: SummaryOptions = {}): string {
   const allRows = groupByComponent(records);
   const pageRows = allRows.filter(isPageRow);
   const mobileRows = allRows.filter(isMobileRow);
@@ -458,9 +468,13 @@ export function buildSummary(records: ResultRecord[], now: Date = new Date()): s
   const inter = count('interaction');
 
   const lines: string[] = [];
-  lines.push('# Spectrum SSR support matrix');
+  lines.push(options.narrowedBy ? '# Spectrum SSR support matrix (partial run)' : '# Spectrum SSR support matrix');
   lines.push('');
   lines.push(`- Run: ${now.toISOString()}`);
+  if (options.narrowedBy) {
+    const raw = options.rawFile ? ` (raw results: ${path.basename(options.rawFile)})` : '';
+    lines.push(`- **Narrowed run** (${options.narrowedBy}): only the selected entries; the complete matrix stays in summary.md${raw}`);
+  }
   lines.push(`- **${green}/${rows.length} components fully green**`);
   lines.push(
     `- Per check: SSR markup ${ssr.ok}/${ssr.total}, hydration ${hyd.ok}/${hyd.total}, flicker ${fl.ok}/${fl.total}, ` +

@@ -3,7 +3,7 @@ import {awaitHydration, collectConsole, measureSection, sectionSelector, settleF
 import {selectedEntries} from './helpers/catalog.ts';
 import {expectNone} from './helpers/checks.ts';
 import {settleTree} from './helpers/dom.ts';
-import {errorMessage, recordResult, step, wasRecorded, type CheckName} from './helpers/results.ts';
+import {errorMessage, recordResult, step, wasRecorded, type CheckName, type StepContext} from './helpers/results.ts';
 import {
   collectShadowStyles,
   exactDiff,
@@ -32,6 +32,18 @@ import {
  *                       - sp-tab (tabs), sp-menu-item (menu), sp-table-cell (table): a parent's restoration must not take
  *                         away the custom properties its not-yet-defined children read (the minifier renamed names one
  *                         element class defines and another reads; the client removed the parent's minified `<style>`).
+ *                       - 0.2.2, the parent late: sp-menu (menu), sp-breadcrumbs (breadcrumbs), sp-table (table). The
+ *                         children hydrate and restore their COMPLETE sheets while the parent runs on its minified CSS;
+ *                         a third view, `state`, captures them after a state change the server did not render (an icon
+ *                         and `disabled` / `focused` on menu items, `disabled` on a breadcrumb item, `active` /
+ *                         `drop-target` on table head cells / rows), whose rules read names only the parent defines (the
+ *                         minifier judged ownership from the trimmed texts and renamed them: the disabled menu-item icon
+ *                         was black).
+ *                       - 0.2.2, sp-theme (table): `hydrateSpectrum()` must report the theme-pending warning (trimmed and
+ *                         minified; not on the full page, nor for any other late tag), and the page after the definition
+ *                         equals full. While sp-theme is missing, the checkbox cells the client creates lack theme values
+ *                         the trimmed theme left out (the documented limitation): that view is only measured.
+ *                     All cases of one entry run in one test (one `styles-late` record per entry).
  *   app --mod- override  an application stylesheet customises sp-action-button through Spectrum's public `--mod-*` hooks.
  *                     Without the client (`?nohydrate=1`) and hydrated, the trimmed and the minified page equal the full page
  *                     (the minifier renamed every `--mod-*` a kept rule defines, so the app's override was ignored).
@@ -83,35 +95,119 @@ async function settled(page: Page, root: string): Promise<void> {
 // Late definitions
 // ---------------------------------------------------------------------------------------------
 
+/** The `HydrationReport.warnings` entry of swc-ssr/client for a theme that has not upgraded (prefix). */
+const THEME_PENDING_WARNING = 'theme pending: sp-theme not defined; trimmed/minified theme values incomplete';
+
+interface ChildState {
+  /** What `apply` changes (for the messages). */
+  label: string;
+  /**
+   * Runs in the page while the late element is still undefined: changes state on its (defined, hydrated) children and
+   * resolves with the number of elements it changed once they updated. Self-contained: Playwright serializes it.
+   */
+  apply: () => Promise<number>;
+}
+
 interface LateCase {
   entry: string;
   tag: string;
+  /** State the children of the late (parent) element enter while it is missing: the `state` view (kept when it arrives). */
+  childState?: ChildState;
+  /** Views that must equal the full-CSS page (default: all). The others are measured and reported in the metrics. */
+  compare?: readonly LateView[];
 }
+
+/**
+ * Late `sp-menu` (0.2.2): a direct item gets an icon and `disabled`, another one `focused` - states no server item had,
+ * so their rules are only in the item's complete sheet, which reads `--spectrum-menu-item-label-icon-color-disabled` and
+ * the focus-indicator names only `sp-menu` / `sp-menu-group` define (0.2.1 renamed them: the disabled icon turned black).
+ */
+const MENU_CHILD_STATE: ChildState = {
+  label: 'icon + disabled on the first direct sp-menu-item, focused on the third',
+  apply: async () => {
+    const items = Array.from(document.querySelectorAll('sp-menu > sp-menu-item')) as Array<HTMLElement & {updateComplete?: Promise<unknown>}>;
+    const first = items[0];
+    const third = items[2];
+    if (!first || !third) return 0;
+    const icon = document.createElement('sp-icon-edit') as HTMLElement & {updateComplete?: Promise<unknown>};
+    icon.setAttribute('slot', 'icon');
+    first.prepend(icon);
+    first.setAttribute('disabled', '');
+    third.setAttribute('focused', '');
+    await Promise.all([first.updateComplete, third.updateComplete, icon.updateComplete]);
+    return 2;
+  },
+};
+
+/** Late `sp-breadcrumbs`: `disabled` on an item reads `--spectrum-breadcrumbs-text-color-disabled` (defined by the parent). */
+const BREADCRUMBS_CHILD_STATE: ChildState = {
+  label: 'disabled on the first sp-breadcrumb-item',
+  apply: async () => {
+    const item = document.querySelector('sp-breadcrumbs > sp-breadcrumb-item') as (HTMLElement & {updateComplete?: Promise<unknown>}) | null;
+    if (!item) return 0;
+    item.setAttribute('disabled', '');
+    await item.updateComplete;
+    return 1;
+  },
+};
+
+/**
+ * Late `sp-table`: its children have no `disabled`; `active` on a sortable head cell reads
+ * `--spectrum-table-icon-color-active`, `drop-target` on a row `--spectrum-table-drop-zone-*` - names only `sp-table`
+ * defines, read only by rules the trimmer dropped from the children's sheets.
+ */
+const TABLE_CHILD_STATE: ChildState = {
+  label: 'active on the first sortable sp-table-head-cell, drop-target on the first sp-table-row',
+  apply: async () => {
+    const cell = document.querySelector('sp-table-head-cell[sortable]') as (HTMLElement & {updateComplete?: Promise<unknown>}) | null;
+    const row = document.querySelector('sp-table-body > sp-table-row') as (HTMLElement & {updateComplete?: Promise<unknown>}) | null;
+    if (!cell || !row) return 0;
+    cell.setAttribute('active', '');
+    row.setAttribute('drop-target', '');
+    await Promise.all([cell.updateComplete, row.updateComplete]);
+    return 2;
+  },
+};
 
 const LATE_CASES: LateCase[] = [
   {entry: 'button', tag: 'sp-theme'},
   {entry: 'theme', tag: 'sp-theme'},
   {entry: 'tabs', tag: 'sp-tab'},
   {entry: 'menu', tag: 'sp-menu-item'},
+  {entry: 'menu', tag: 'sp-menu', childState: MENU_CHILD_STATE},
+  {entry: 'breadcrumbs', tag: 'sp-breadcrumbs', childState: BREADCRUMBS_CHILD_STATE},
   {entry: 'table', tag: 'sp-table-cell'},
+  {entry: 'table', tag: 'sp-table', childState: TABLE_CHILD_STATE},
+  // While sp-theme is missing, content the client creates (the checkbox cells of a selectable sp-table) reads theme
+  // properties the trimmed theme left out - the known limitation the theme-pending warning reports. Only the page after
+  // the definition must equal full; the missing view is measured (metrics `uncomparedPixels_sp-theme_missing_*`).
+  {entry: 'table', tag: 'sp-theme', compare: ['defined']},
 ];
 
-const LATE_VIEWS = ['missing', 'defined'] as const;
+const LATE_VIEWS = ['missing', 'state', 'defined'] as const;
 type LateView = (typeof LATE_VIEWS)[number];
 
+const viewsOf = (c: LateCase): LateView[] => LATE_VIEWS.filter((view) => view !== 'state' || c.childState !== undefined);
+const comparedViewsOf = (c: LateCase): LateView[] => viewsOf(c).filter((view) => !c.compare || c.compare.includes(view));
+
 interface LateLoad {
-  shots: Record<LateView, Buffer>;
-  clips: Record<LateView, Rect>;
+  shots: Partial<Record<LateView, Buffer>>;
+  clips: Partial<Record<LateView, Rect>>;
   report: HydrationReportLike;
   errors: string[];
   /** `customElements.get(tag)` was undefined after hydration, defined after `__swcSsrDefineLate()`. */
   heldBack: boolean;
   definedLate: boolean;
+  /** Elements `childState.apply` changed (0: it found nothing to change). */
+  changed: number;
   /** Shadow-root styles once the definition arrived and settled. */
   styles: ShadowStyles;
 }
 
-/** One load of the case's entry page in `mode`, captured while the tag is missing and after it was defined. */
+/**
+ * One load of the case's entry page in `mode`, captured while the tag is missing, after the child state (if any), and
+ * after it was defined.
+ */
 async function lateLoad(browser: Browser, baseURL: string | undefined, c: LateCase, mode: StylesMode, reference?: LateLoad): Promise<LateLoad> {
   const context = await newOracleContext(browser, baseURL, {javaScriptEnabled: true});
   try {
@@ -127,95 +223,147 @@ async function lateLoad(browser: Browser, baseURL: string | undefined, c: LateCa
     await settled(page, root);
     const heldBack = await page.evaluate((tag) => customElements.get(tag) === undefined, c.tag);
     const options = {fullPage: true, animations: 'disabled', caret: 'hide'} as const;
-    const clips = {} as Record<LateView, Rect>;
-    const shots = {} as Record<LateView, Buffer>;
-    clips.missing = reference?.clips.missing ?? (await measureSection(page, root)).clip;
-    shots.missing = await page.screenshot({clip: clips.missing, ...options});
+    const clips: Partial<Record<LateView, Rect>> = {};
+    const shots: Partial<Record<LateView, Buffer>> = {};
+    const capture = async (view: LateView): Promise<void> => {
+      const clip = reference?.clips[view] ?? (await measureSection(page, root)).clip;
+      clips[view] = clip;
+      shots[view] = await page.screenshot({clip, ...options});
+    };
+    await capture('missing');
+    let changed = 0;
+    if (c.childState) {
+      changed = await page.evaluate(c.childState.apply);
+      await settled(page, root);
+      await capture('state');
+    }
 
     await page.evaluate(() => (window as unknown as {__swcSsrDefineLate?: () => Promise<number>}).__swcSsrDefineLate?.());
     await settled(page, root);
     const definedLate = await page.evaluate((tag) => customElements.get(tag) !== undefined, c.tag);
-    clips.defined = reference?.clips.defined ?? (await measureSection(page, root)).clip;
-    shots.defined = await page.screenshot({clip: clips.defined, ...options});
+    await capture('defined');
     const styles = await page.evaluate(collectShadowStyles);
-    return {shots, clips, report, errors: [...logs.errors], heldBack, definedLate, styles};
+    return {shots, clips, report, errors: [...logs.errors], heldBack, definedLate, changed, styles};
   } finally {
     await context.close();
   }
 }
 
-for (const c of LATE_CASES.filter((candidate) => selected(candidate.entry))) {
-  test.describe(`styles: ${c.entry}`, () => {
-    test.describe.configure({timeout: TEST_TIMEOUT_MS});
-    test.afterEach(async ({}, testInfo) => recordFallback(c.entry, 'styles-late', testInfo));
+/**
+ * One late case: full, trimmed and minified loads, repeated (fresh loads, up to `ATTEMPTS` in all) while a compared
+ * view differs. Preconditions and leftovers are asserted here; returns the pixel problems (empty when the case passes).
+ */
+async function runLateCase(browser: Browser, baseURL: string | undefined, c: LateCase, ctx: StepContext): Promise<string[]> {
+  const key = c.tag;
+  const views = viewsOf(c);
+  const compared = comparedViewsOf(c);
+  const fulls: LateLoad[] = [await lateLoad(browser, baseURL, c, 'full')];
+  const others: Record<Mode, LateLoad[]> = {trimmed: [], minified: []};
+  for (const mode of MODES) others[mode].push(await lateLoad(browser, baseURL, c, mode, fulls[0]));
 
-    test(`late definition: ${c.tag}`, async ({browser}, testInfo) => {
-      await step(testInfo, c.entry, 'styles-late', async (ctx) => {
+  const shot = (load: LateLoad, view: LateView): Buffer => load.shots[view]!;
+  const failing = (): Array<{mode: Mode; view: LateView}> =>
+    MODES.flatMap((mode) =>
+      compared
+        .filter((view) => !matchesAnywhere(fulls.map((load) => shot(load, view)), others[mode].map((load) => shot(load, view))))
+        .map((view) => ({mode, view})),
+    );
+  const firstFailing = failing();
+  let pending = firstFailing;
+  for (let attempt = 2; attempt <= ATTEMPTS && pending.length > 0; attempt++) {
+    fulls.push(await lateLoad(browser, baseURL, c, 'full', fulls[0]));
+    for (const mode of MODES) {
+      if (pending.some((pair) => pair.mode === mode)) others[mode].push(await lateLoad(browser, baseURL, c, mode, fulls[0]));
+    }
+    pending = failing();
+  }
+  ctx.metrics[`attempts_${key}`] = fulls.length;
+  let firstPixels = 0;
+  for (const {mode, view} of firstFailing) firstPixels += exactDiff(shot(fulls[0]!, view), shot(others[mode][0]!, view)).diffPixels;
+  ctx.metrics[`diffPixelsFirstAttempt_${key}`] = firstPixels;
+  if (firstFailing.length > 0 && pending.length === 0) {
+    ctx.note(
+      `late ${c.tag}: ${firstFailing.map(({mode, view}) => `${mode} ${view}`).join(', ')} differed (${firstPixels} px) on the first ` +
+        'attempt and matched later: load-to-load variation',
+    );
+  }
+  // Views measured but not required to match (a known limitation): reported, not failed.
+  for (const view of views.filter((candidate) => !compared.includes(candidate))) {
+    for (const mode of MODES) {
+      ctx.metrics[`uncomparedPixels_${key}_${view}_${mode}`] = exactDiff(shot(fulls[0]!, view), shot(others[mode][0]!, view)).diffPixels;
+    }
+  }
+
+  // The case is only meaningful when the definition really was missing after hydration and arrived later.
+  for (const [label, loads] of [['full', fulls], ...MODES.map((mode) => [mode, others[mode]] as const)] as const) {
+    const load = loads[0]!;
+    expect(load.heldBack, `${label}: <${c.tag}> is still undefined after hydrateSpectrum() (?late=${c.tag})`).toBe(true);
+    expect(load.definedLate, `${label}: <${c.tag}> is defined after __swcSsrDefineLate()`).toBe(true);
+    if (c.childState) expect(load.changed, `${label}: ${c.childState.label} found its elements`).toBeGreaterThan(0);
+    expectNone(load.report.errors, `HydrationReport.errors (${label}, late ${c.tag})`);
+    expectNone(load.errors, `console errors / uncaught exceptions (${label}, late ${c.tag})`);
+    // 0.2.2: hydrateSpectrum() reports a theme still on its trimmed / minified server CSS - and only then.
+    const themeWarnings = load.report.warnings.filter((warning) => warning.startsWith(THEME_PENDING_WARNING));
+    const expectWarning = c.tag === 'sp-theme' && label !== 'full';
+    if (expectWarning) ctx.metrics[`themeWarning_${key}_${label}`] = themeWarnings.length;
+    expect(
+      themeWarnings.length,
+      `${label}, late ${c.tag}: HydrationReport.warnings ${expectWarning ? 'reports' : 'does not report'} "${THEME_PENDING_WARNING}" ` +
+        `(warnings: ${JSON.stringify(load.report.warnings)})`,
+    ).toBe(expectWarning ? 1 : 0);
+  }
+  for (const mode of MODES) {
+    const styles = others[mode][0]!.styles;
+    ctx.metrics[`markedLeft_${key}_${mode}`] = styles.marked;
+    expectNone(
+      Object.entries(styles.markedByTag).map(([tag, count]) => `${tag} x${count}`),
+      `${mode}: shadow roots that still hold a trimmed / minified server <style> after <${c.tag}> was defined`,
+    );
+    expectNone(
+      Object.entries(styles.litWithoutAdopted).map(([tag, count]) => `${tag} x${count}`),
+      `${mode}: hydrated sp-* Lit elements without adopted style sheets after <${c.tag}> was defined`,
+    );
+  }
+
+  const problems: string[] = [];
+  let failingPixels = 0;
+  for (const {mode, view} of pending) {
+    const diff = exactDiff(shot(fulls[0]!, view), shot(others[mode][0]!, view));
+    const control = fulls[1] ? exactDiff(shot(fulls[0]!, view), shot(fulls[1], view)).diffPixels : 0;
+    failingPixels += diff.diffPixels;
+    const files = saveMismatch(`${c.entry}.late-${c.tag}.${view}`, mode, {full: shot(fulls[0]!, view), other: shot(others[mode][0]!, view), diff: diff.diffPng});
+    const what = view === 'missing' ? 'not defined yet' : view === 'state' ? `not defined yet, ${c.childState!.label}` : 'defined late';
+    problems.push(
+      `${mode}, <${c.tag}> ${what}: ${diff.diffPixels} px differ in all ${fulls.length} attempt(s)` +
+        `${diff.sizeChanged ? ` (size ${diff.a.width}x${diff.a.height} full / ${diff.b.width}x${diff.b.height} ${mode})` : ''} ` +
+        `(control, full CSS loaded twice: ${control} px; ${files.join(', ')})`,
+    );
+  }
+  ctx.metrics[`diffPixels_${key}`] = failingPixels;
+  return problems;
+}
+
+// One test per catalog entry, its cases in a row: one `styles-late` record per entry (the summary keeps one result per
+// entry and check, so a later passing case must not hide an earlier failing one).
+const lateEntries = [...new Set(LATE_CASES.map((c) => c.entry))].filter(selected);
+for (const entry of lateEntries) {
+  const cases = LATE_CASES.filter((c) => c.entry === entry);
+  test.describe(`styles: ${entry}`, () => {
+    test.describe.configure({timeout: TEST_TIMEOUT_MS * cases.length});
+    test.afterEach(async ({}, testInfo) => recordFallback(entry, 'styles-late', testInfo));
+
+    test(`late definition: ${cases.map((c) => c.tag).join(', ')}`, async ({browser}, testInfo) => {
+      await step(testInfo, entry, 'styles-late', async (ctx) => {
         const baseURL = testInfo.project.use.baseURL;
-        ctx.metrics.lateTag = c.tag;
-        const fulls: LateLoad[] = [await lateLoad(browser, baseURL, c, 'full')];
-        const others: Record<Mode, LateLoad[]> = {trimmed: [], minified: []};
-        for (const mode of MODES) others[mode].push(await lateLoad(browser, baseURL, c, mode, fulls[0]));
-
-        const failing = (): Array<{mode: Mode; view: LateView}> =>
-          MODES.flatMap((mode) =>
-            LATE_VIEWS.filter(
-              (view) => !matchesAnywhere(fulls.map((load) => load.shots[view]), others[mode].map((load) => load.shots[view])),
-            ).map((view) => ({mode, view})),
-          );
-        const firstFailing = failing();
-        let pending = firstFailing;
-        for (let attempt = 2; attempt <= ATTEMPTS && pending.length > 0; attempt++) {
-          fulls.push(await lateLoad(browser, baseURL, c, 'full', fulls[0]));
-          for (const mode of MODES) {
-            if (pending.some((pair) => pair.mode === mode)) others[mode].push(await lateLoad(browser, baseURL, c, mode, fulls[0]));
-          }
-          pending = failing();
-        }
-        ctx.metrics.attempts = fulls.length;
-        let firstPixels = 0;
-        for (const {mode, view} of firstFailing) firstPixels += exactDiff(fulls[0]!.shots[view], others[mode][0]!.shots[view]).diffPixels;
-        ctx.metrics.diffPixelsFirstAttempt = firstPixels;
-        if (firstFailing.length > 0 && pending.length === 0) {
-          ctx.note(`${firstFailing.map(({mode, view}) => `${mode} ${view}`).join(', ')} differed (${firstPixels} px) on the first attempt and matched later: load-to-load variation`);
-        }
-
-        // The case is only meaningful when the definition really was missing after hydration and arrived later.
-        for (const [label, loads] of [['full', fulls], ...MODES.map((mode) => [mode, others[mode]] as const)] as const) {
-          const load = loads[0]!;
-          expect(load.heldBack, `${label}: <${c.tag}> is still undefined after hydrateSpectrum() (?late=${c.tag})`).toBe(true);
-          expect(load.definedLate, `${label}: <${c.tag}> is defined after __swcSsrDefineLate()`).toBe(true);
-          expectNone(load.report.errors, `HydrationReport.errors (${label})`);
-          expectNone(load.errors, `console errors / uncaught exceptions (${label})`);
-        }
-        for (const mode of MODES) {
-          const styles = others[mode][0]!.styles;
-          ctx.metrics[`markedLeft_${mode}`] = styles.marked;
-          expectNone(
-            Object.entries(styles.markedByTag).map(([tag, count]) => `${tag} x${count}`),
-            `${mode}: shadow roots that still hold a trimmed / minified server <style> after <${c.tag}> was defined`,
-          );
-          expectNone(
-            Object.entries(styles.litWithoutAdopted).map(([tag, count]) => `${tag} x${count}`),
-            `${mode}: hydrated sp-* Lit elements without adopted style sheets after <${c.tag}> was defined`,
-          );
-        }
-
+        ctx.metrics.lateTags = cases.map((c) => c.tag).join(',');
         const problems: string[] = [];
-        let failingPixels = 0;
-        for (const {mode, view} of pending) {
-          const diff = exactDiff(fulls[0]!.shots[view], others[mode][0]!.shots[view]);
-          const control = fulls[1] ? exactDiff(fulls[0]!.shots[view], fulls[1].shots[view]).diffPixels : 0;
-          failingPixels += diff.diffPixels;
-          const files = saveMismatch(`${c.entry}.late-${c.tag}.${view}`, mode, {full: fulls[0]!.shots[view], other: others[mode][0]!.shots[view], diff: diff.diffPng});
-          problems.push(
-            `${mode}, <${c.tag}> ${view === 'missing' ? 'not defined yet' : 'defined late'}: ${diff.diffPixels} px differ in all ${fulls.length} attempt(s)` +
-              `${diff.sizeChanged ? ` (size ${diff.a.width}x${diff.a.height} full / ${diff.b.width}x${diff.b.height} ${mode})` : ''} ` +
-              `(control, full CSS loaded twice: ${control} px; ${files.join(', ')})`,
-          );
+        let diffPixels = 0;
+        for (const c of cases) {
+          problems.push(...(await runLateCase(browser, baseURL, c, ctx)));
+          diffPixels += Number(ctx.metrics[`diffPixels_${c.tag}`] ?? 0);
         }
-        ctx.metrics.diffPixels = failingPixels;
-        expect(problems, `with <${c.tag}> defined after hydration, the trimmed / minified page differs from the full-CSS page`).toEqual([]);
+        ctx.metrics.diffPixels = diffPixels;
+        expect(problems, 'with a definition held back until after hydration, the trimmed / minified page differs from the full-CSS page').toEqual([]);
       });
     });
   });
