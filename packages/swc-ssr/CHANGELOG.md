@@ -4,6 +4,58 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 Until 1.0.0 a minor version may contain breaking changes.
 
+## [0.2.1] - unreleased
+
+Fixes of the review of the style trimming (details: `docs/API.md` "Styles", `docs/DESIGN.md` "Style trimming").
+
+### Fixed
+
+- Trimmed and minified pages lost their theme when `sp-theme` was defined after the components hydrated, or never on
+  the client: the theme bridge removed the server `<style>` of themes that had not upgraded (measured on the theme
+  catalog entry: 51 of 52 elements styled differently). The bridge now leaves a theme that has not upgraded alone; a
+  minified element keeps its minified CSS while such a theme is pending (its server `<style>` defines the short names
+  only) and gets its complete stylesheets when `sp-theme` is defined.
+- Minified pages: an element defined or hydrated after its parent was restored read custom properties that nothing
+  defined any more (`sp-tabs` -> `sp-tab`, `sp-table` -> rows and cells, `sp-menu-group` -> `sp-menu-item`,
+  `sp-picker` -> `sp-popover`, `sp-number-field` -> `sp-infield-button`, `sp-tray` -> `sp-dialog-wrapper`; 124-155
+  elements styled differently while the child was undefined, for good if it never got defined). Both sides changed:
+  `minifyCustomProperties` renames only names that the theme alone defines or that live inside the stylesheets of one
+  element class (or one stylesheet several classes share), and `swc-ssr/client` keeps a restored element's minified
+  `<style>` (a subset of its adopted sheets, which win the cascade) until no element runs on minified CSS.
+- `minifyCustomProperties` never renames Spectrum's public customisation names `--mod-*`, `--highcontrast-*` and
+  `--system-*` any more: kept component rules define many of them (253 `--mod-*` names on the catalog), and renaming
+  them cut application overrides (`sp-action-button { --mod-actionbutton-background-color-default: red }`) off before
+  hydration, and for good without JavaScript.
+- `undefinedPrefixes` no longer rewrites `var(` inside strings and comments (`content: "var(--mod-x, y)"`).
+- `references`, `undefinedPrefixes` and `keep` given as a single string (or RegExp) count as one entry: a bare
+  `references: '--spectrum-*'` was iterated per character, and its `'*'` became an empty prefix that matched every
+  name (theme pruning off).
+- The theme bridge no longer depends on constructable-stylesheet support: it is a plain `<style>`, and the client's
+  path for browsers without constructable stylesheets needs it as much.
+
+### Changed
+
+- Minified output is larger because of the names above: button page CSS 298 -> 454 KiB (gzip 13 -> 15 KiB), picker
+  231 -> 330 KiB (gzip 24 -> 43 KiB), whole catalog 5689 -> 8224 KiB = 31.4 -> 45.4 % of full (gzip 486 -> 640 KiB).
+  Trimmed output is unchanged.
+- `swc-ssr/client` costs less on pages without trimmed CSS: the fallback for unmarked server CSS compares lengths
+  first and the text once per class, and the server `<style>` lookup no longer copies `childNodes` (whole catalog,
+  `full` mode, CPU profile, 6 loads each: 20-33 ms -> 7-14 ms of server-style work while hydrating, 10-28 ms -> 6-10 ms
+  for the scan at load).
+- `StyleOptions.references` is typed `readonly string[] | Iterable<string>`, `undefinedPrefixes` `readonly string[]`,
+  `keep` `ReadonlyArray<string | RegExp>`.
+- Documentation: attributes a component sets in `connectedCallback()` have no trimmed rules until hydration (use
+  `keep`); a build-time custom-property renamer must process the SSR server bundle too, or be disabled while swc-ssr
+  renders (else `full` pages go unstyled at hydration).
+
+### Added
+
+- Demo: `?late=<tag>[,...]` holds `customElements.define()` of these tags back until `window.__swcSsrDefineLate()`.
+- Tests: `tests/styles-late.spec.ts` (definitions that arrive after hydration or never - `sp-theme`, `sp-tab`,
+  `sp-menu-item`, `sp-table-cell` -, an application stylesheet setting `--mod-*` hooks, and the client's path without
+  constructable stylesheets; pixel-exact against the full CSS), unit tests for the minifier's name rules, strings in
+  `undefinedPrefixes`, single-string options and the cost of the unmarked-CSS fallback.
+
 ## [0.2.0] - unreleased
 
 Optional trimming of the server CSS, and the hydration semantics it needs (details: `docs/API.md` "Styles",

@@ -18,6 +18,8 @@ import {pageTemplate} from './page.js';
  *   window.__swcSsrReport()    the current HydrationReport (swc-ssr/client hydrationReport())
  *   window.__swcSsrDefined     true once every custom element of the page is defined (before hydrateSpectrum() runs)
  *   window.__swcSsrRelease()   with ?hydrateDelay=hold: lets hydrateSpectrum() run
+ *   window.__swcSsrDefineLate() with ?late=: defines the held-back tags now; resolves (with their number) when they are
+ *                              defined and every element of the page has settled
  *
  * URL options (SSR mode):
  *   ?agnostic=1      hydrate without the template: remove `defer-hydration` top-down (the framework-agnostic path)
@@ -25,6 +27,11 @@ import {pageTemplate} from './page.js';
  *   ?hydrateDelay=N  wait N ms (after the definitions loaded) before calling hydrateSpectrum(): holds the page in the
  *                    state an application with a late bootstrap is in - elements defined, nothing hydrated yet;
  *                    `hold` instead of N waits until the page calls window.__swcSsrRelease()
+ *   ?late=<tag>[,<tag>...]  holds back the `customElements.define()` of these tags (intercepted before any Spectrum
+ *                    module loads) until the page calls window.__swcSsrDefineLate() - e.g. after hydrateSpectrum()
+ *                    finished: elements whose definition arrives after hydration (a lazily loaded chunk, a theme
+ *                    registered late) or never (the page never calls it). hydrateSpectrum() waits for them as for any
+ *                    missing definition (its timeout, then a warning) and hydrates the rest.
  */
 declare global {
   interface Window {
@@ -33,6 +40,7 @@ declare global {
     __swcSsrReport?: () => HydrationReport;
     __swcSsrDefined?: boolean;
     __swcSsrRelease?: () => void;
+    __swcSsrDefineLate?: () => Promise<number>;
   }
 }
 
@@ -40,6 +48,50 @@ const app = document.getElementById('app');
 const mode: 'ssr' | 'csr' = app?.dataset.mode === 'csr' ? 'csr' : 'ssr';
 window.__swcSsrMode = mode;
 window.__swcSsrReport = () => hydrationReport();
+
+/** `?late=`: the definitions held back until `window.__swcSsrDefineLate()` (see the file comment). */
+const lateTags = new Set(
+  (new URLSearchParams(location.search).get('late') ?? '')
+    .split(',')
+    .map((tag) => tag.trim().toLowerCase())
+    .filter((tag) => tag !== ''),
+);
+if (mode === 'ssr' && lateTags.size > 0) {
+  const held: Array<() => void> = [];
+  let released = false;
+  const define = CustomElementRegistry.prototype.define;
+  CustomElementRegistry.prototype.define = function (
+    this: CustomElementRegistry,
+    name: string,
+    constructor: CustomElementConstructor,
+    options?: ElementDefinitionOptions,
+  ): void {
+    if (!released && lateTags.has(name)) {
+      held.push(() => define.call(this, name, constructor, options));
+      return;
+    }
+    define.call(this, name, constructor, options);
+  };
+  window.__swcSsrDefineLate = async () => {
+    released = true;
+    const definitions = held.splice(0);
+    for (const definition of definitions) definition();
+    // The upgraded elements hydrate on their own (their `defer-hydration` was removed by hydrateSpectrum()).
+    const updates: unknown[] = [];
+    const visit = (scope: ParentNode): void => {
+      for (const el of Array.from(scope.querySelectorAll('*'))) {
+        updates.push((el as {updateComplete?: unknown}).updateComplete);
+        if (el.shadowRoot) visit(el.shadowRoot);
+      }
+    };
+    visit(document);
+    await Promise.race([
+      Promise.all(updates.filter((update) => update instanceof Promise).map((update) => (update as Promise<unknown>).catch(() => {}))),
+      new Promise((resolve) => setTimeout(resolve, 3000)),
+    ]);
+    return definitions.length;
+  };
+}
 
 function failureReport(message: string): HydrationReport {
   return {...hydrationReport(), errors: [...hydrationReport().errors, message]};

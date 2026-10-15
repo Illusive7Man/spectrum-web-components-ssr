@@ -58,11 +58,32 @@ export interface NormalizedStyleOptions {
   keep: Array<string | RegExp>;
 }
 
+/**
+ * The entries of a list option. A single value (a bare string, or a RegExp for `keep`) is ONE entry: `Iterable<string>`
+ * also accepts a string, and iterating it gives its characters: `references: '--spectrum-*'` became 12 one-character
+ * entries, among them `'*'`, an empty prefix that matches every name and so disabled the theme pruning. Anything
+ * else that is not iterable is ignored.
+ */
+function listOption(value: unknown, isSingle: (value: unknown) => boolean): unknown[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  if (isSingle(value)) {
+    return [value];
+  }
+  if (typeof (value as {[Symbol.iterator]?: unknown})[Symbol.iterator] === 'function') {
+    return Array.from(value as Iterable<unknown>);
+  }
+  return [];
+}
+
+const isString = (value: unknown): boolean => typeof value === 'string' || value instanceof String;
+
 export function normalizeStyleOptions(options: StyleOptions | undefined): NormalizedStyleOptions {
   const mode = options?.mode === 'trimmed' ? 'trimmed' : 'full';
   const referenceNames = new Set<string>();
   const referencePrefixes: string[] = [];
-  for (const entry of options?.references ?? []) {
+  for (const entry of listOption(options?.references, isString)) {
     const name = String(entry).trim();
     if (!name) {
       continue;
@@ -78,9 +99,13 @@ export function normalizeStyleOptions(options: StyleOptions | undefined): Normal
     trimTheme: options?.trimTheme ?? true,
     referenceNames,
     referencePrefixes,
-    undefinedPrefixes: (options?.undefinedPrefixes ?? []).map((prefix) => String(prefix)).filter(Boolean),
+    undefinedPrefixes: listOption(options?.undefinedPrefixes, isString)
+      .map((prefix) => String(prefix))
+      .filter(Boolean),
     minifyCustomProperties: options?.minifyCustomProperties === true,
-    keep: [...(options?.keep ?? [])],
+    keep: listOption(options?.keep, (value) => isString(value) || value instanceof RegExp).map((entry) =>
+      entry instanceof RegExp ? entry : String(entry),
+    ),
   };
 }
 

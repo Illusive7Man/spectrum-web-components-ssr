@@ -94,27 +94,31 @@ export interface StyleOptions {
   /**
    * Custom-property names (`--name`), or prefixes ending in `*` (`--spectrum-global-*`), used by CSS the server
    * cannot see (the application's own stylesheets): kept with their dependencies, never renamed. See
-   * `scanCustomPropertyReferences()`.
+   * `scanCustomPropertyReferences()`. A single string is one entry (`'--spectrum-*'` = `['--spectrum-*']`); values
+   * that are not iterable are ignored.
    */
-  references?: Iterable<string>;
+  references?: readonly string[] | Iterable<string>;
   /**
    * Prefixes of custom properties the application never defines (e.g. `['--mod-']`): `var(--mod-x, V)` becomes `V`
    * in kept rules. Names a kept rule, a `style` attribute or another `<style>` of the output defines are left alone.
-   * Default `[]`.
+   * Default `[]`. A single string is one prefix.
    */
-  undefinedPrefixes?: string[];
+  undefinedPrefixes?: readonly string[];
   /**
    * Default false. Renames the custom properties that the page's own stylesheets (theme and components) define to
-   * short names (`--a`, `--b`, ...), consistently across all of them. Names in `references`, and names that a `style`
-   * attribute or another `<style>` of the output defines or uses, are never renamed. Unsafe when the application
-   * sets or reads `--spectrum-*` / `--system-*` itself without listing them in `references`. The changed `<style>`
+   * short names (`--a`, `--b`, ...), consistently across all of them. Only names defined by the theme alone, or
+   * defined and used only inside the stylesheets of one element class, are renamed. Never renamed: names in
+   * `references`, names that a `style` attribute or another `<style>` of the output defines or uses, names one
+   * element's stylesheets define and another's read, and Spectrum's public customisation names (`--mod-*`,
+   * `--highcontrast-*`, `--system-*`: application overrides keep working before hydration). Unsafe when the
+   * application sets or reads `--spectrum-*` itself without listing them in `references`. The changed `<style>`
    * elements carry `data-swc-styles="minified"`: an element that has not got its complete stylesheets back yet
    * depends on the renamed theme properties, which `<sp-theme>` drops when it upgrades on the client (it replaces its
    * declarative shadow root); `swc-ssr/client` keeps them defined until every marked element is restored.
    */
   minifyCustomProperties?: boolean;
   /** Selectors (substring of, or RegExp tested against, a rule's selector text) whose rules are always kept. */
-  keep?: Array<string | RegExp>;
+  keep?: ReadonlyArray<string | RegExp>;
 }
 
 /** `RenderReport.styles` (trimmed mode only). */

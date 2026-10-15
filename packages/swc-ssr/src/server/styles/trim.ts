@@ -12,7 +12,8 @@
  *  4. `trimTheme`: theme custom properties are kept only when used - transitively through the theme's own
  *     definitions - by a kept rule of a component stylesheet, a non-custom-property declaration or nested rule of
  *     the theme, a `style` attribute, another `<style>` of the output, or `references`.
- *  5. `minifyCustomProperties`: see `minify()`.
+ *  5. `minifyCustomProperties`: see `minify()` (only names the client can switch at once; never Spectrum's public
+ *     `--mod-*` / `--highcontrast-*` / `--system-*`).
  *  6. Every token is replaced by its stylesheet's text: all instances of a stylesheet get the same text. A `<style>`
  *     whose text changed gets `data-swc-styles="trimmed"` / `"minified"` (`STYLE_MARKER_ATTRIBUTE`, collector.ts).
  *
@@ -648,11 +649,57 @@ function ruleText(state: SheetState, rule: StyleRuleNode, used: Set<string> | un
 }
 
 /**
- * `minifyCustomProperties`: renames the custom properties the trimmed stylesheets define to short names, most used
- * first, consistently across all of them. Never renamed: names in `references`, names that occur in `style`
- * attributes or in CSS the trimmer does not control (other `<style>` elements, complete stylesheets), and names
- * only referenced (`var(--x)` without a definition on the page: the application may define them). Short names
- * skip every name that occurs anywhere on the page and every `references` name or prefix (custom properties of the
+ * Spectrum's public customisation API: `--mod-*` (per-component overrides an application sets on an element or a
+ * container), `--highcontrast-*` (forced-colors overrides) and `--system-*` (the system layer between the theme and
+ * the components). Application CSS sets and reads them, so `minifyCustomProperties` never renames them, whatever
+ * the options say (a kept component rule may define one, e.g. a parent's `--mod-*` for its children: renaming that
+ * name in the component's reads would cut the application's override off until hydration, or for good without JS).
+ */
+export const PUBLIC_CUSTOM_PROPERTY_PREFIXES: readonly string[] = ['--mod-', '--highcontrast-', '--system-'];
+
+const isPublicName = (name: string): boolean => PUBLIC_CUSTOM_PROPERTY_PREFIXES.some((prefix) => name.startsWith(prefix));
+
+/** Owners of a trimmed stylesheet for `minify()`: the theme (every fragment, bridged as one), or its element class and its stylesheet object. */
+const THEME_GROUP = '#theme'; // never an element tag
+const classGroupOf = (state: SheetState): string => (state.entry.theme ? THEME_GROUP : state.entry.tag);
+
+/** Identity of a stylesheet across element classes (one `CSSResult` in the `elementStyles` of several classes). */
+function sheetGroupOf(state: SheetState, ids: Map<unknown, string>): string {
+  if (state.entry.theme) {
+    return THEME_GROUP;
+  }
+  const style = state.entry.style;
+  const key = style !== null && (typeof style === 'object' || typeof style === 'function') ? style : `text:${state.entry.cssText}`;
+  let id = ids.get(key);
+  if (id === undefined) {
+    id = `#sheet${ids.size}`;
+    ids.set(key, id);
+  }
+  return id;
+}
+
+/**
+ * `minifyCustomProperties`: renames custom properties of the trimmed stylesheets to short names, most used first,
+ * consistently across all of them.
+ *
+ * A name is renamed only when the client can switch every use of it at once (`swc-ssr/client` restores an element's
+ * complete stylesheets - original names - in its hydrating update, element by element, and bridges the theme's
+ * server `<style>` until no minified element is left):
+ *  - every definition is in the theme (any reference): the bridged theme keeps the short name defined for elements
+ *    that still run on their minified CSS, the upgraded theme defines the original one for restored elements; or
+ *  - every definition and every reference is in the stylesheets of ONE element class (its sheets are restored
+ *    together), or inside ONE stylesheet object that several classes share (each instance defines and reads the name
+ *    in its own shadow root, and switches both at once).
+ * A name one element class defines and another reads (`sp-tabs` -> `sp-tab`, `sp-table` -> its rows and cells,
+ * `sp-menu-group` -> `sp-menu-item`, `sp-picker` -> `sp-popover`, ...) is never renamed: a child defined or
+ * hydrated after its parent was restored would read a short name nothing defines any more. (The client also keeps a
+ * restored element's minified `<style>` until no element runs on minified CSS: the two together cover inheritance
+ * between nested instances.)
+ *
+ * Never renamed either: `PUBLIC_CUSTOM_PROPERTY_PREFIXES`, names in `references`, names that occur in `style`
+ * attributes or in CSS the trimmer does not control (other `<style>` elements, complete stylesheets), and names only
+ * referenced (`var(--x)` without a definition on the page: the application may define them). Short names skip every
+ * name that occurs anywhere on the page and every `references` name or prefix (custom properties of the
  * application's own stylesheets, which the server cannot see otherwise).
  */
 function minify(trimmed: SheetState[], styleAttributes: string[], otherCss: string[], options: NormalizedStyleOptions): void {
@@ -663,19 +710,49 @@ function minify(trimmed: SheetState[], styleAttributes: string[], otherCss: stri
   for (const text of otherCss) {
     addNames(text, excluded);
   }
-  const defined = new Set<string>();
   const taken = new Set<string>([...excluded, ...options.referenceNames]);
   const counts = new Map<string, number>();
+  /** Owners whose stylesheets define a name, and owners whose stylesheets mention it at all (definitions, references). */
+  const definedBy = new Map<string, Set<string>>();
+  const classesUsing = new Map<string, Set<string>>();
+  const sheetsUsing = new Map<string, Set<string>>();
+  const sheetIds = new Map<unknown, string>();
+  const note = (map: Map<string, Set<string>>, name: string, group: string) => {
+    const groups = map.get(name);
+    if (groups) {
+      groups.add(group);
+    } else {
+      map.set(name, new Set([group]));
+    }
+  };
   for (const state of trimmed) {
-    addDefinitions(state.text, defined);
+    const classGroup = classGroupOf(state);
+    const sheetGroup = sheetGroupOf(state, sheetIds);
+    const definitions = new Set<string>();
+    addDefinitions(state.text, definitions);
+    for (const name of definitions) {
+      note(definedBy, name, classGroup);
+    }
     NAME_TOKEN_RE.lastIndex = 0;
     for (let match = NAME_TOKEN_RE.exec(state.text); match !== null; match = NAME_TOKEN_RE.exec(state.text)) {
       taken.add(match[0]);
       counts.set(match[0], (counts.get(match[0]) ?? 0) + state.occurrences);
+      note(classesUsing, match[0], classGroup);
+      note(sheetsUsing, match[0], sheetGroup);
     }
   }
-  const candidates = [...defined]
-    .filter((name) => counts.has(name) && !excluded.has(name) && !isReferenceOption(name, options))
+  const owned = (name: string): boolean => {
+    const definers = definedBy.get(name)!;
+    if (definers.has(THEME_GROUP)) {
+      return definers.size === 1;
+    }
+    return classesUsing.get(name)?.size === 1 || sheetsUsing.get(name)?.size === 1;
+  };
+  const candidates = [...definedBy.keys()]
+    .filter(
+      (name) =>
+        counts.has(name) && !excluded.has(name) && !isPublicName(name) && !isReferenceOption(name, options) && owned(name),
+    )
     .sort((a, b) => counts.get(b)! - counts.get(a)! || (a < b ? -1 : a > b ? 1 : 0));
   if (candidates.length === 0) {
     return;

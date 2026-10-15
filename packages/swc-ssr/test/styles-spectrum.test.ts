@@ -214,10 +214,12 @@ test('theme properties used only inside @keyframes or other at-rules are kept', 
   assert.match(shadowStyles(output, 'sp-theme')[0], /--spectrum-gray-800:/);
 });
 
-test('minified button page: one distinct sp-button text under 15 KB, the trimmed page under one renaming', () => {
+test('minified button page: one distinct sp-button text under 22 KB, the trimmed page under one renaming', () => {
   const texts = shadowStyles(minified.html, 'sp-button');
   assert.equal(new Set(texts).size, 1);
-  assert.ok(texts[0].length < 15 * 1024, `minified sp-button ${texts[0].length} bytes`);
+  // 12.9 KB in 0.2.0 (budget 15 KB); 20.3 KB since 0.2.1, which keeps the public --system-* / --highcontrast-* /
+  // --mod-* names of Spectrum (asserted below).
+  assert.ok(texts[0].length < 22 * 1024, `minified sp-button ${texts[0].length} bytes`);
   // Every <style> of the minified page is the trimmed one with custom-property names replaced, by one injective
   // mapping for the whole page.
   const styleRe = /<style\b[^>]*>([\s\S]*?)<\/style>/g;
@@ -244,6 +246,13 @@ test('minified button page: one distinct sp-button text under 15 KB, the trimmed
   });
   const renamed = [...forward].filter(([from, to]) => from !== to);
   assert.ok(renamed.length > 100, `${renamed.length} names renamed`);
+  // Spectrum's public customisation names are never renamed (0.2.1): application CSS sets and reads them.
+  const publicNames = [...forward.keys()].filter((name) => /^--(mod|highcontrast|system)-/.test(name));
+  assert.ok(publicNames.length > 100, `${publicNames.length} public names on the page`);
+  assert.deepEqual(
+    renamed.filter(([from]) => publicNames.includes(from)).map(([from, to]) => `${from} -> ${to}`),
+    []
+  );
   // Names only referenced (never defined on the page) keep their names.
   const defined = new Set<string>();
   for (const text of trimmedStyles) {

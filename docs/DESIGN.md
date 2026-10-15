@@ -147,7 +147,9 @@ Lit into browser mode - check `lit`'s `node` export conditions).
   nested Spectrum elements enable in parent-first order.
 * Provide a `hydrationReport()` that collects hydration-time console errors and `defer-hydration` leftovers (for the tests).
 * Server styles (0.2.0, see "Style trimming"): a hydrated element whose server `<style>` was trimmed adopts its class's
-  complete `elementStyles` in its hydrating update, and the server's `<sp-theme>` `<style>` is bridged until then.
+  complete `elementStyles` in its hydrating update, and the server's `<sp-theme>` `<style>` is bridged until then
+  (0.2.1: only upgraded themes lose it; minified elements wait for a pending theme and keep their minified `<style>`
+  until no element runs on minified CSS).
 
 ### Demo (`demo/`)
 
@@ -535,24 +537,38 @@ docs/API.md "Styles". Code: `packages/swc-ssr/src/server/styles/`, `packages/swc
    root that only holds a `<slot>`). The components' own custom-property declarations are not pruned: one trimmed text
    per class and the contract's rule-level granularity keep them.
 6. **`undefinedPrefixes`** collapse `var(--prefix-x, V)` to `V` in kept rules when nothing on the page defines
-   `--prefix-x`. **`minifyCustomProperties`** renames the names the trimmed sheets define, most used first, to
-   `--a`.. (skipping every name on the page and every `references` name or prefix; never renaming `references`,
-   names in `style` attributes or uncontrolled CSS, or names that are only read).
+   `--prefix-x` (`var(` inside strings and comments is not a reference: the scan is string / comment aware).
+   **`minifyCustomProperties`** renames, most used first, to `--a`.. (skipping every name on the page and every
+   `references` name or prefix) only names the client can switch in one step (0.2.1): names whose every definition
+   is in the theme (the bridge keeps the short name defined for elements on minified CSS, the upgraded theme the
+   original one for restored elements), or whose every definition and use is inside the sheets of one element class
+   (restored together) or inside one sheet object several classes share (each instance defines and reads the name in
+   its own root). Owners are computed per trimmed sheet (`#theme`, the tag, the sheet object). Never renamed:
+   `PUBLIC_CUSTOM_PROPERTY_PREFIXES` (`--mod-*`, `--highcontrast-*`, `--system-*`, Spectrum's customisation API,
+   whatever the options), names one element class defines and another reads, `references`, names in `style`
+   attributes or uncontrolled CSS, and names that are only read. Joining classes that share a sheet into one owner
+   (union-find) was measured and rejected: one checkmark / chevron icon sheet joins 20 classes - `sp-picker` with
+   `sp-popover` and `sp-menu-item`, `sp-tray` with `sp-dialog-wrapper`, `sp-menu` with `sp-menu-group` -, which
+   are exactly the parent / child pairs the rule exists for.
 7. **Assembly and markers.** `@keyframes` are kept when a kept rule or other CSS names them; groups when a rule inside
    is kept (named `@layer` blocks always). A sheet nothing was taken from is emitted as its original text (so it is
    byte-identical and unmarked). Every token is replaced by its sheet's text; a `<style>` whose text changed gets
    `data-swc-styles="trimmed"` / `"minified"`. `report.styles` lists every sheet with its instances and sizes. A
    failure in any step falls back to the complete stylesheets with a `#render` warning.
 
-Measured (`.probe/css-stats.ts`, docs/API.md "Styles" has the table): button page CSS 1230 -> 823 KB trimmed / 298 KB
-minified (gzip 120 -> 79 / 13 KB), picker 1294 -> 475 / 231 KB, whole catalog 18121 -> 12616 KB (69.6 %) / 5689 KB
-(31.4 %), 4329 KB (23.9 %) with `undefinedPrefixes: ['--mod-']`. Trimming costs 9-23 ms on one-component pages and
+Measured (`.probe/css-stats.ts`, `.probe/review-styles/sizes.ts`, docs/API.md "Styles" has the table): button page CSS
+1230 -> 823 KB trimmed / 454 KB minified (gzip 120 -> 79 / 15 KB), picker 1294 -> 475 / 330 KB, whole catalog
+18121 -> 12616 KB (69.6 %) / 8224 KB (45.4 %), 6864 KB (37.9 %) with `undefinedPrefixes: ['--mod-']`. 0.2.0 renamed
+more (minified 298 KB / 231 KB / 5689 KB = 31.4 %, 4329 KB = 23.9 % with `--mod-` collapsed); the names 0.2.1 keeps
+(`.probe/review-styles/long-names.ts`, catalog with `--mod-` collapsed): `--system-*` 0.92 MB, `--highcontrast-*`
+0.76 MB, cross-class `--spectrum-*` 0.76 MB (1.37 MB before shared sheets counted as one owner), `--mod-*` the page
+defines 0.51 MB. Trimming costs 9-23 ms on one-component pages and
 about 0.2-0.6 s on the whole catalog (up to 1.4 s on a loaded machine), which is less than the variance of the
 catalog render itself. Heap stays flat (`.probe/leak.ts` STYLES=trimmed N=8: 102-103 MB from render 2). Two early
 targets are not reachable under the contract (one trimmed text per element class, rule granularity for component
 sheets): the catalog's trimmed CSS stays at 69.6 % of full (the catalog renders nearly every variant of every
 component, and the remaining bulk is the components' own custom-property declarations), and the button page's
-`sp-button` sheets keep 36.6 of 41 KB trimmed (12.9 KB minified).
+`sp-button` sheets keep 36.6 of 41 KB trimmed (19.9 KB minified, 12.9 KB in 0.2.0).
 
 ### Hydration semantics (the user's report: "hydration broke / ignored all styling")
 
@@ -576,13 +592,28 @@ Fix (`client/server-styles.ts`, called from the hydration hooks in `hooks.ts` an
   removed. On a page with any marked `<style>`, every hydrated Lit element does this (also the ones whose sheets came
   out complete), so after hydration the page runs on adopted complete sheets throughout. Unconditional, independent of
   `removeServerStyles`, which keeps its meaning for `full` pages. Mismatch recovery keeps the server `<style>`s and
-  restores afterwards. Browsers without constructable stylesheets get the complete text in the first server `<style>`.
+  restores afterwards. Browsers without constructable stylesheets get the complete text in the first server `<style>`
+  (minified: in an added `<style>` after the kept one). Unmarked server CSS on a page without any marked `<style>`
+  is restored only when its text differs from the class's (lengths first, the text once per class: 0.2.1, see below).
+* **Minified elements (0.2.1).** A restored minified element keeps its server `<style>`s (`keepUntilSettled`): they
+  are removed with the bridges, when no marked `<style>` is pending (restored hosts do not count). The kept rules are
+  a subset of the adopted complete sheets, which come later in the cascade and win wherever both have a rule; the kept
+  `<style>` only adds definitions of short names, for elements below that still read them (not hydrated, or defined
+  late). And while a bridged theme has not upgraded (`themePending`: connected, not an instance of the defined
+  `sp-theme` class), a minified element is not restored at all - the theme's server `<style>` defines the short
+  names only, so the complete sheets would find nothing; `onThemeDefined` (the `whenDefined('sp-theme')` microtask,
+  after the bridges are re-inserted) restores the hydrated ones.
 * **Theme bridge.** At import of `swc-ssr/client` (before any definition), every `<sp-theme>` (light DOM or open
   shadow roots) whose declarative shadow root holds a marked `<style>` is recorded, with a count of the other marked
   `<style>`s. In the `whenDefined('sp-theme')` microtask - the same task as the upgrade, so before any paint - the
   recorded `<style>` elements are put back into the themes' shadow roots. They are removed when the count of marked
   `<style>`s reaches 0 and a scan of the document confirms it, or at the end of `hydrateSpectrum()` when none is left;
-  otherwise they stay (late or lazy hydration, elements that never get defined). A `<style>` element instead of an
+  otherwise they stay (late or lazy hydration, elements that never get defined). Only upgraded themes (re-inserted, or
+  an instance of the defined class) lose them: the server `<style>` of a theme whose definition comes after the
+  components hydrated, or never, is all that theme has (0.2.0 removed it: the theme catalog entry with `sp-theme`
+  defined late lost its theme in trimmed and minified mode, 51 of 52 elements styled differently; `.probe/review-styles/deep2.ts`).
+  The bridge is installed whether or not the browser has constructable stylesheets (it is a plain `<style>`). A
+  `<style>` element instead of an
   adopted `CSSStyleSheet` (the first design): `Theme.adoptStyles()` re-assigns `adoptedStyleSheets` whenever a theme
   fragment is registered, which would drop an adopted bridge; a `<style>` in the shadow root comes before the adopted
   sheets in the cascade, so the complete theme still wins wherever both define a name.
@@ -616,10 +647,41 @@ and for `/`:
 | `post-hydration:states` | interactive entries, after hydration: hover, focus, click the first control, `disabled` on it, `size="xl"` on the first button, `quiet` toggled, `selected` on the first menu item / tab, `invalid` on the first text field (each awaited through `updateComplete`); every step equals the full page |
 | `removeServerStyles` | `?removeStyles=1` on full and trimmed pages: no `<style>` left in sp-* shadow roots, paint equals the full page |
 | `size` | `/styles.json`: trimmed smaller than full; `report.styles` consistent |
+| `late definition: <tag>` (tests/styles-late.spec.ts) | `?late=<tag>` holds a definition back until after `hydrateSpectrum()`: `sp-theme` (button, theme), `sp-tab` (tabs), `sp-menu-item` (menu), `sp-table-cell` (table); trimmed and minified equal full while it is missing and after it arrived; then no marked `<style>` left, every hydrated Lit element on adopted sheets |
+| `app --mod-* override` (tests/styles-late.spec.ts) | an application stylesheet sets `--mod-actionbutton-*` on `sp-action-button`: without the client and hydrated, trimmed and minified equal full |
+| `without constructable stylesheets` (tests/styles-late.spec.ts) | only the client's feature test fails (Lit and `<sp-theme>` keep adopting): held and hydrated button / tabs pages, trimmed and minified equal full |
 
 A negative control (restoration and bridge disabled) fails `post-hydration` exactly like the report (minified button
 section 98,653 px, its height 541 -> 470 px; trimmed tabs 2,155 px after hydration) and `post-hydration:states` in
-every step.
+every step. The tests of tests/styles-late.spec.ts fail on the 0.2.0 sources: late `sp-theme` 98,215 px (button) /
+255,805 px (theme) in trimmed and minified mode, late `sp-tab` 31,472 px, `sp-menu-item` 26,522 px, `sp-table-cell`
+111,874 px (minified), the `--mod-*` override 37,248 px (minified, without the client), the held minified page without
+constructable stylesheets 98,653 px (button) / 29,068 px (tabs).
+
+### Review fixes (0.2.1)
+
+* **Pending themes (H1).** See "Theme bridge" and "Minified elements" above. Probe: `.probe/review-styles/deep2.ts`
+  with `EXTRA=late=sp-theme` (the demo's `?late=`, `AFTER='window.__swcSsrDefineLate()'`): 0 differing elements of
+  52 (theme) / 143 (button) before and after the definition, trimmed and minified (0.2.0: 51 of 52 measured here, 142 of
+  143 on the button page in the review).
+* **Cross-element names (M1).** Server: the ownership rule of step 6 removes the dependency (a restored parent
+  defines, in its complete sheets, the original name its unhydrated children read - also for states it enters later).
+  Client: kept minified `<style>`s are the second line, for what the rule cannot see (inheritance between nested
+  instances of one class, or of classes sharing a sheet; output of a 0.2.0 server). Probe as above with `late=sp-tab` / `sp-menu-item` / `sp-table-cell`:
+  0 differing elements (0.2.0: 124 / 155 / 131 in minified mode).
+* **Public names (M2).** `PUBLIC_CUSTOM_PROPERTY_PREFIXES`; `.probe/review-styles/mod-override.ts`: minified without
+  the client now shows the app's `rgb(255, 0, 0)` (0.2.0: `rgb(253, 253, 253)`).
+* **Strings (L1)**: `collapseVars` finds `var(` with `nextVarCall` (the parser's string / comment / `url()` skipping).
+  **Single-string options (L2)**: `listOption` in collector.ts. **Cost on full pages (L3)**: `differsFromClass`
+  (lengths, then the text once per class, `textLength` reads the text nodes' `length` without building the string)
+  and `serverStyleElements` indexing the live `childNodes` instead of `Array.from()`; `.probe/review-styles/client-cost-prof.ts`
+  (CDP CPU profile of the catalog in `full` mode, 6 loads before and after): `settleServerStyles` 19.8-32.9 -> 7.0-14.1 ms,
+  the text comparison 7.9-17.0 -> 2.8-6.2 ms, the scan at load 9.5-27.5 -> 6.2-10.4 ms; minified pages unchanged within
+  noise.
+  The fallback is kept on pages without marked `<style>`s (instead of being skipped there): it is what moves a `full`
+  page whose client bundle was rewritten by a build-time renamer onto consistent (client) names after hydration.
+  **Bridge without constructable stylesheets (L4)**: the install condition no longer asks.
+* **Docs (L5)**: docs/API.md "What trimming can break" (attributes set in `connectedCallback()`, build-time renamers).
 
 ## Coding conventions
 

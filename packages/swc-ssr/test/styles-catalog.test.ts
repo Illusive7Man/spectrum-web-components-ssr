@@ -131,9 +131,11 @@ test('catalog: sizes and timing of trimmed and minified renders', (t) => {
     );
   }
   assert.equal(a.fullBytes, b.fullBytes);
-  // Measured 69.6% (trimmed) and 23.9% (minified + --mod-) with @spectrum-web-components 1.12.4.
+  // Measured 69.6% (trimmed) and 37.9% (minified + --mod-) with @spectrum-web-components 1.12.4. 0.2.0 renamed more
+  // (23.9%, budget 30%): since 0.2.1 the minifier keeps Spectrum's public --system-* / --highcontrast-* / --mod-* names
+  // and the names one element class defines for another (docs/API.md "Styles"), which costs 14 points here.
   assert.ok(a.trimmedBytes < 0.75 * a.fullBytes, `trimmed keeps ${a.trimmedBytes} of ${a.fullBytes}`);
-  assert.ok(b.trimmedBytes < 0.3 * b.fullBytes, `minified keeps ${b.trimmedBytes} of ${b.fullBytes}`);
+  assert.ok(b.trimmedBytes < 0.42 * b.fullBytes, `minified keeps ${b.trimmedBytes} of ${b.fullBytes}`);
   // Trimming (warm: the second render) is a small part of the render (robust against machine load, unlike
   // absolute times).
   assert.ok(b.durationMs < 0.3 * minified.report.durationMs, `trimming ${b.durationMs} of ${minified.report.durationMs} ms`);
@@ -209,4 +211,51 @@ test('catalog: the trimmed theme defines every theme property the trimmed compon
   }
   assert.deepEqual([...missing], []);
   assert.ok(trimmedTheme.length < fullTheme.length / 2, `theme ${kb(trimmedTheme.length)} of ${kb(fullTheme.length)}`);
+});
+
+test('catalog (0.2.1, M1 / M2): every renamed name a component reads is defined in its own <style> or the theme; public names are never renamed', () => {
+  // A component restored by the client switches every name of its own <style> at once, and the bridged theme keeps
+  // the theme's short names defined: a short name a component reads must come from one of the two. A short name
+  // defined by another element class (`sp-tabs` for `sp-tab`) would vanish when that element is restored first.
+  const styles = hostStyles(minified.html);
+  const themeDefinitions = new Set<string>();
+  for (const {tag, text} of styles) {
+    if (tag === 'sp-theme') {
+      addDefinitions(text, themeDefinitions);
+    }
+  }
+  const isShort = (name: string) => /^--[A-Za-z]{1,3}$/.test(name);
+  const foreign = new Set<string>();
+  let shortReads = 0;
+  for (const {tag, text} of styles) {
+    if (tag === 'sp-theme') {
+      continue;
+    }
+    const own = new Set<string>();
+    addDefinitions(text, own);
+    for (const name of scanCustomPropertyReferences(text)) {
+      if (!isShort(name)) {
+        continue;
+      }
+      shortReads++;
+      if (!own.has(name) && !themeDefinitions.has(name)) {
+        foreign.add(`<${tag}> reads ${name}`);
+      }
+    }
+  }
+  assert.ok(shortReads > 1000, `${shortReads} reads of renamed names`);
+  assert.deepEqual([...foreign].slice(0, 20), []);
+  // Spectrum's public customisation names (--system-*, --highcontrast-*; --mod-* are collapsed by undefinedPrefixes
+  // here) stay readable: every one the trimmed page has, the minified page has too.
+  const publicNames = (output: string) => {
+    const names = new Set<string>();
+    for (const match of output.matchAll(/(?<![\w-])--(?:system|highcontrast)-[\w-]+/g)) {
+      names.add(match[0]);
+    }
+    return names;
+  };
+  const before = publicNames(trimmed.html);
+  const after = publicNames(minified.html);
+  assert.ok(before.size > 500, `${before.size} --system-* / --highcontrast-* names on the trimmed page`);
+  assert.deepEqual([...before].filter((name) => !after.has(name)).slice(0, 20), []);
 });

@@ -110,13 +110,13 @@ console.log(report.styles); // {mode, sheets: [{id, tag, instances, fullBytes, t
 |---|---|---|
 | `mode` | `'full'` | `'trimmed'` turns trimming on. |
 | `trimTheme` | `true` | prune the theme's custom-property declarations nothing on the page uses. |
-| `references` | none | custom-property names (or `--prefix-*`) your own CSS uses: kept with their dependencies, never renamed. |
+| `references` | none | custom-property names (or `--prefix-*`) your own CSS uses: kept with their dependencies, never renamed. A single string is one entry. |
 | `undefinedPrefixes` | `[]` | prefixes your app never defines, e.g. `['--mod-']`: `var(--mod-x, V)` becomes `V`. |
-| `minifyCustomProperties` | `false` | rename the remaining custom properties to `--a`, `--b`, ... (unsafe when your app sets or reads `--spectrum-*` / `--system-*` itself without listing them in `references`). |
+| `minifyCustomProperties` | `false` | rename custom properties to `--a`, `--b`, ...: names only the theme defines, or that live inside one component's stylesheets. Never Spectrum's public `--mod-*` / `--highcontrast-*` / `--system-*` (your overrides keep working), never names one component defines for another. Unsafe when your app sets or reads `--spectrum-*` itself without listing them in `references`. |
 | `keep` | none | selectors (substring or RegExp) whose rules are always kept. |
 
-Measured: button page 1.22 MB -> 0.83 MB trimmed -> 0.31 MB minified (gzip 120 -> 79 -> 13 KB); picker 1.32 -> 0.52 ->
-0.28 MB; the whole 59-component catalog 18.66 -> 13.31 -> 6.55 MB. Trimming takes 9-23 ms on a one-component page and
+Measured: button page 1.22 MB -> 0.83 MB trimmed -> 0.47 MB minified (gzip 120 -> 79 -> 15 KB); picker 1.32 -> 0.52 ->
+0.38 MB; the whole 59-component catalog 18.66 -> 13.31 -> 9.03 MB. Trimming takes 9-23 ms on a one-component page and
 about half a second on the catalog. Every `<style>` the trimmer changed carries `data-swc-styles="trimmed"` /
 `"minified"` (`STYLE_MARKER_ATTRIBUTE`).
 
@@ -126,8 +126,20 @@ the complete theme when it upgrades. Without the client a trimmed page breaks on
 (the rules were trimmed away), and a minified page loses its theme values as soon as `<sp-theme>` upgrades.
 `swc-ssr/client` gives every hydrated element its class's complete stylesheets back in the same task as its hydrating
 update, on both the template and the agnostic path, and keeps the server's theme `<style>` until the last element is
-restored. What else trimming can break (application CSS that reads theme variables, state changes before hydration,
-minification and app-defined `--spectrum-*` overrides): see docs/API.md "Styles" in the repository.
+restored, and only from themes that have upgraded (a theme defined late, or never, keeps its server CSS; minified
+elements wait for it). What else trimming can break (application CSS that reads theme variables, state changes before
+hydration, minification and app-defined `--spectrum-*` overrides): see docs/API.md "Styles" in the repository. Two
+things to know:
+
+- **Attributes a component sets in `connectedCallback()`** are not in the server output, so trimmed CSS has no
+  `:host([attr])` rules for them between the element's definition and its hydration (the hydrating update restores
+  the complete sheets). If that window is visible in your app (a late `hydrateSpectrum()`, lazy hydration), list such
+  selectors in `keep`.
+- **Build-time custom-property renamers** (an "unused CSS" step that renames or drops custom properties in your built
+  bundle) must process the SSR server bundle too, or be disabled while swc-ssr renders - in `full` mode as well.
+  Otherwise the server writes the original names, the client's `<sp-theme>` defines the renamed ones when it upgrades,
+  and the page that looked right from the server goes unstyled at hydration. `minifyCustomProperties` handles both
+  sides and is the supported way to get short names.
 
 ### Adapters
 

@@ -60,6 +60,9 @@ const STYLE_CHECKS: CheckName[] = [
   'styles-post-states',
   'styles-release',
   'styles-size',
+  'styles-late',
+  'styles-app-mod',
+  'styles-no-cssom',
 ];
 
 /** Result rows of the phone emulation (tests/mobile.spec.ts), one per component: `mobile: <name>`. */
@@ -321,7 +324,11 @@ function stylesSection(rows: Row[], pageRow: Row | undefined): string[] {
       'equals the hydrated full-CSS page (0 px), no `<style data-swc-styles>` is left in any shadow root, and every hydrated sp-* Lit element runs on ' +
       'adopted sheets. Post states = then hover, focus and click the first control, set `disabled` on it, `size="xl"` on the first button, toggle ' +
       '`quiet`, select the first menu item / tab, set `invalid` on the first text field: every step equals the full-CSS page (0 px). ' +
-      'Release = `removeServerStyles`: no `<style>` left in the sp-* shadow roots, and the hydrated paint equals the full-CSS page.',
+      'Release = `removeServerStyles`: no `<style>` left in the sp-* shadow roots, and the hydrated paint equals the full-CSS page. ' +
+      'Late = tests/styles-late.spec.ts, a definition held back until after hydration (`?late=<tag>`: sp-theme, sp-tab, sp-menu-item, ' +
+      'sp-table-cell): the trimmed / minified page equals the full-CSS page while it is missing and after it arrived (0 px). ' +
+      'App --mod- = an application stylesheet setting the `--mod-*` hooks of Spectrum: trimmed / minified equal full before and after hydration. ' +
+      'No CSSOM = the client on its path for browsers without constructable stylesheets: held (theme upgraded, nothing hydrated) and hydrated equal full.',
   );
   lines.push('- Sizes are the text of the `<style>` elements of the served page (KiB); gzip is of the whole html document.');
   lines.push('');
@@ -377,7 +384,14 @@ function stylesSection(rows: Row[], pageRow: Row | undefined): string[] {
     lines.push('');
   }
   if (pageRow) {
-    const checks = STYLE_CHECKS.filter((check) => check !== 'styles-states' && check !== 'styles-post-states')
+    const checks = STYLE_CHECKS.filter(
+      (check) =>
+        check !== 'styles-states' &&
+        check !== 'styles-post-states' &&
+        check !== 'styles-late' &&
+        check !== 'styles-app-mod' &&
+        check !== 'styles-no-cssom',
+    )
       .map((check) => {
         const rec = pageRow.checks[check];
         const name = check.slice('styles-'.length);
@@ -391,9 +405,9 @@ function stylesSection(rows: Row[], pageRow: Row | undefined): string[] {
   }
 
   lines.push(
-    '| Component | Oracle | Minified | States | Hydration | Flicker % | Restore | Post | Post states | Release | CSS KiB full -> trimmed (minified) | Trimmed share | gzip KiB full -> trimmed (minified) | Notes |',
+    '| Component | Oracle | Minified | States | Hydration | Flicker % | Restore | Post | Post states | Release | Late | App --mod- | No CSSOM | CSS KiB full -> trimmed (minified) | Trimmed share | gzip KiB full -> trimmed (minified) | Notes |',
   );
-  lines.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
+  lines.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
   for (const row of styleRows) {
     lines.push(
       '| ' +
@@ -408,6 +422,9 @@ function stylesSection(rows: Row[], pageRow: Row | undefined): string[] {
           styleStatus(row, 'styles-post', pixels),
           styleStatus(row, 'styles-post-states', pixels),
           styleStatus(row, 'styles-release', pixels),
+          styleStatus(row, 'styles-late', pixels),
+          styleStatus(row, 'styles-app-mod', pixels),
+          styleStatus(row, 'styles-no-cssom', pixels),
           cssCell(row),
           shareCell(row),
           kbChain(row.checks['styles-size']?.metrics, ['gzipFull', 'gzipTrimmed', 'gzipMinified']),

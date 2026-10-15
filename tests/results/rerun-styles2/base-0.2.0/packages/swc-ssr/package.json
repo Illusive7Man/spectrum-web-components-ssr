@@ -1,0 +1,78 @@
+{
+  "name": "swc-ssr",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Server-side rendering + hydration support for Adobe Spectrum Web Components (1st-gen) as a plugin for @lit-labs/ssr. No changes to Spectrum sources.",
+  "license": "Apache-2.0",
+  "author": "Savo Pejović",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/REPLACE_WITH_OWNER/spectrum-web-components-ssr.git",
+    "directory": "packages/swc-ssr"
+  },
+  "bugs": {
+    "url": "https://github.com/REPLACE_WITH_OWNER/spectrum-web-components-ssr/issues"
+  },
+  "homepage": "https://github.com/REPLACE_WITH_OWNER/spectrum-web-components-ssr/tree/main/packages/swc-ssr#readme",
+  "keywords": [
+    "spectrum",
+    "spectrum-web-components",
+    "adobe-spectrum",
+    "web-components",
+    "lit",
+    "lit-ssr",
+    "ssr",
+    "server-side-rendering",
+    "declarative-shadow-dom",
+    "hydration"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "sideEffects": [
+    "./src/dom-shim/*",
+    "./dist/dom-shim/*",
+    "./src/client/*",
+    "./dist/client/*",
+    "./src/server/**",
+    "./dist/server/**"
+  ],
+  "exports": {
+    "./server": "./src/server/index.ts",
+    "./client": "./src/client/index.ts",
+    "./dom-shim": "./src/dom-shim/index.ts",
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@webcomponents/template-shadowroot": "0.2.1",
+    "css-select": "^5.1.0",
+    "css-what": "^6.2.2",
+    "domhandler": "^5.0.3",
+    "parse5": "^7.2.1",
+    "parse5-htmlparser2-tree-adapter": "^7.1.0"
+  },
+  "peerDependencies": {
+    "@lit-labs/ssr": "~4.1.0",
+    "@lit-labs/ssr-client": "^1.1.8",
+    "@lit-labs/ssr-dom-shim": "^1.6.0",
+    "@spectrum-web-components/base": "^1.12.4",
+    "lit": "^3.3.0",
+    "lit-element": "^4.2.0",
+    "lit-html": "^3.3.0"
+  },
+  "peerDependenciesMeta": {
+    "@spectrum-web-components/base": {
+      "optional": true
+    }
+  }
+}

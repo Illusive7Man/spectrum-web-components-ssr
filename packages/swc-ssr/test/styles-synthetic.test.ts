@@ -2,12 +2,14 @@
  * `styles: {mode: 'trimmed'}` on small synthetic Lit elements: which rules survive (`:host()`, `:host-context()`,
  * `::slotted()` incl. forwarded slots, state pseudo-classes, `:not()`, pseudo-elements, `@media` nesting,
  * `@keyframes` references, `@font-face`), `undefinedPrefixes`, `minifyCustomProperties` and `keep`, plus the CSS
- * text helpers (`scanCustomPropertyReferences`, the slice-preserving parser).
+ * text helpers (`scanCustomPropertyReferences`, the slice-preserving parser). The 0.2.1 review fixes at the end:
+ * `var()` in strings (L1), list options given as a single string (L2), names the minifier must not rename (M1, M2).
  */
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {installSpectrumSsr, renderSpectrum, scanCustomPropertyReferences} from '../src/server/index.ts';
 import {collapseVars, parseRules, splitBlock} from '../src/server/styles/css-text.ts';
+import {normalizeStyleOptions} from '../src/server/styles/collector.ts';
 import {isElement, parseHtml, shadowTemplateOf, templateContent, walkElements} from './helpers.ts';
 import type {AnyNode, Element} from 'domhandler';
 
@@ -373,4 +375,150 @@ test('collapseVars replaces var(--prefix-x, V) by V, recursively, and leaves the
   assert.equal(collapseVars('var(--mod-a,)', collapse), 'var(--mod-a,)', 'empty fallback: unchanged');
   const same = 'calc(var(--c) * 2)';
   assert.equal(collapseVars(same, collapse), same);
+});
+
+/* -------------------------------------------------------------------------------------------------------------- *
+ * 0.2.1 review fixes
+ * -------------------------------------------------------------------------------------------------------------- */
+
+test('L1: collapseVars leaves var() inside strings and comments alone', () => {
+  const collapse = (name: string) => name.startsWith('--mod-');
+  assert.equal(collapseVars('"var(--mod-x, y)"', collapse), '"var(--mod-x, y)"', 'double-quoted string');
+  assert.equal(collapseVars("'a' var(--mod-a, 1px) 'var(--mod-b, 2px)'", collapse), "'a' 1px 'var(--mod-b, 2px)'");
+  assert.equal(collapseVars('/* var(--mod-a, 1px) */ var(--mod-a, 2px)', collapse), '/* var(--mod-a, 1px) */ 2px');
+  assert.equal(collapseVars('var(--c, "var(--mod-a, 1px)")', collapse), 'var(--c, "var(--mod-a, 1px)")', 'string in a fallback');
+  assert.equal(collapseVars('x-var(--mod-a, 1px)', collapse), 'x-var(--mod-a, 1px)', '"var" ending a longer name');
+  assert.equal(collapseVars('VAR(--mod-a, 3px) "\\"var(--mod-a, 4px)"', collapse), '3px "\\"var(--mod-a, 4px)"', 'escaped quote');
+});
+
+test('L1: a content string that looks like var() survives undefinedPrefixes in a rendered page', async () => {
+  class TrimContent extends LitElement {
+    static override styles = css`
+      #c::before { content: "var(--mod-x, y)"; color: var(--mod-x, red); }
+    `;
+    override render() {
+      return html`<i id="c"></i>`;
+    }
+  }
+  customElements.define('trim-content', TrimContent);
+  const {html: output} = await renderSpectrum(html`<trim-content></trim-content>`, {
+    styles: {mode: 'trimmed', undefinedPrefixes: ['--mod-']},
+  });
+  const [text] = shadowStyles(output, 'trim-content');
+  assert.ok(text.includes('content: "var(--mod-x, y)"'), text);
+  assert.ok(text.includes('color: red'), text);
+});
+
+test('L2: references / undefinedPrefixes / keep given as a single string are one entry, not its characters', async () => {
+  const one = normalizeStyleOptions({mode: 'trimmed', references: '--spectrum-*'});
+  assert.deepEqual(one.referencePrefixes, ['--spectrum-']);
+  assert.deepEqual([...one.referenceNames], []);
+  assert.deepEqual([...normalizeStyleOptions({references: '--keep-me'}).referenceNames], ['--keep-me']);
+  assert.deepEqual([...normalizeStyleOptions({references: new Set(['--a', '--b-*'])}).referenceNames], ['--a']);
+  assert.deepEqual(normalizeStyleOptions({references: 42 as unknown as string[]}).referencePrefixes, [], 'not iterable: ignored');
+  assert.deepEqual(normalizeStyleOptions({undefinedPrefixes: '--mod-' as unknown as string[]}).undefinedPrefixes, ['--mod-']);
+  assert.deepEqual(normalizeStyleOptions({keep: '.kept' as unknown as string[]}).keep, ['.kept']);
+  const re = /kept/;
+  assert.deepEqual(normalizeStyleOptions({keep: re as unknown as RegExp[]}).keep, [re]);
+  // A rendered page: the bare string behaves like the one-element array.
+  const asArray = await renderSpectrum(html`<trim-vars></trim-vars>`, {
+    styles: {mode: 'trimmed', minifyCustomProperties: true, references: ['--keep-me']},
+  });
+  const asString = await renderSpectrum(html`<trim-vars></trim-vars>`, {
+    styles: {mode: 'trimmed', minifyCustomProperties: true, references: '--keep-me'},
+  });
+  assert.equal(asString.html, asArray.html);
+  assert.ok(shadowStyles(asString.html, 'trim-vars')[0].includes('--keep-me: blue'));
+});
+
+test('M2: minifyCustomProperties never renames the public --mod-* / --highcontrast-* / --system-* names of Spectrum', async () => {
+  class TrimPublic extends LitElement {
+    static override styles = css`
+      :host { --mod-pub-size: 3px; --system-pub-color: red; --highcontrast-pub-color: blue; --own-private-size: 4px; }
+      #p { width: var(--mod-pub-size); color: var(--system-pub-color); outline-color: var(--highcontrast-pub-color); }
+      #p { height: var(--own-private-size); }
+    `;
+    override render() {
+      return html`<i id="p"></i>`;
+    }
+  }
+  customElements.define('trim-public', TrimPublic);
+  for (const references of [undefined, ['--own-*'], ['--mod-pub-size']]) {
+    const {html: output} = await renderSpectrum(html`<trim-public></trim-public>`, {
+      styles: {mode: 'trimmed', minifyCustomProperties: true, ...(references ? {references} : {})},
+    });
+    const [text] = shadowStyles(output, 'trim-public');
+    for (const name of ['--mod-pub-size', '--system-pub-color', '--highcontrast-pub-color']) {
+      assert.ok(text.includes(`${name}:`) && text.includes(`var(${name})`), `${name} kept (references ${references}): ${text}`);
+    }
+    const ownKept = references !== undefined && references[0] === '--own-*';
+    assert.equal(text.includes('--own-private-size'), ownKept, `a private name is renamed unless referenced: ${text}`);
+  }
+});
+
+test('M1: names one element class defines and another reads are never renamed; class- and sheet-internal ones are', async () => {
+  class TrimParent extends LitElement {
+    static override styles = css`
+      :host { --parent-to-child-gap: 5px; --parent-own-gap: 6px; }
+      #q { margin: var(--parent-own-gap); }
+    `;
+    override render() {
+      return html`<i id="q"></i><slot></slot>`;
+    }
+  }
+  customElements.define('trim-parent', TrimParent);
+  class TrimChild extends LitElement {
+    static override styles = css`
+      :host { --child-own-gap: 7px; }
+      #r { padding: var(--parent-to-child-gap); margin: var(--child-own-gap); }
+    `;
+    override render() {
+      return html`<i id="r"></i>`;
+    }
+  }
+  customElements.define('trim-child', TrimChild);
+  // One stylesheet object in two classes: each instance defines and reads the name in its own shadow root.
+  const shared = css`
+    :host { --shared-own-gap: 8px; }
+    #s { padding: var(--shared-own-gap); }
+  `;
+  class TrimShareA extends LitElement {
+    static override styles = [shared];
+    override render() {
+      return html`<i id="s"></i>`;
+    }
+  }
+  customElements.define('trim-share-a', TrimShareA);
+  class TrimShareB extends LitElement {
+    static override styles = [shared, css`#s { margin: 1px; }`];
+    override render() {
+      return html`<i id="s"></i>`;
+    }
+  }
+  customElements.define('trim-share-b', TrimShareB);
+  // One class, two stylesheets: defined in the one, read in the other (they are restored together).
+  class TrimTwoSheets extends LitElement {
+    static override styles = [css`:host { --two-sheets-gap: 9px; }`, css`#t { padding: var(--two-sheets-gap); }`];
+    override render() {
+      return html`<i id="t"></i>`;
+    }
+  }
+  customElements.define('trim-two-sheets', TrimTwoSheets);
+  const {html: output} = await renderSpectrum(
+    html`<trim-parent><trim-child></trim-child></trim-parent><trim-share-a></trim-share-a><trim-share-b></trim-share-b><trim-two-sheets></trim-two-sheets>`,
+    {styles: {mode: 'trimmed', minifyCustomProperties: true}}
+  );
+  const [parent] = shadowStyles(output, 'trim-parent');
+  const [child] = shadowStyles(output, 'trim-child');
+  assert.ok(parent.includes('--parent-to-child-gap: 5px'), `a cross-class name stays where it is defined: ${parent}`);
+  assert.ok(child.includes('var(--parent-to-child-gap)'), `... and where it is read: ${child}`);
+  assert.ok(!parent.includes('--parent-own-gap'), `a class-internal name is renamed: ${parent}`);
+  assert.ok(!child.includes('--child-own-gap'), `a class-internal name is renamed: ${child}`);
+  const [a] = shadowStyles(output, 'trim-share-a');
+  const [b] = shadowStyles(output, 'trim-share-b');
+  const sharedShort = /(--[A-Za-z]+): 8px/.exec(a)?.[1];
+  assert.ok(sharedShort && !a.includes('--shared-own-gap'), `a sheet-internal name is renamed: ${a}`);
+  assert.ok(b.includes(`${sharedShort}: 8px`) && b.includes(`var(${sharedShort})`), `... the same way in both classes: ${b}`);
+  const [two] = shadowStyles(output, 'trim-two-sheets');
+  assert.ok(!two.includes('--two-sheets-gap'), `a name of one class across its sheets is renamed: ${two}`);
 });

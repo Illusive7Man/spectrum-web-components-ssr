@@ -11,9 +11,10 @@ and the phone checks (picker, action menu, contextual help at 390x844) are green
 (about 110 MB heap for repeated full-catalog renders).
 
 Since 0.2.0 the server can trim the CSS it writes into the declarative shadow roots (`styles: {mode: 'trimmed'}`,
-optionally with short custom-property names): the button page goes from 1.22 MB to 0.83 MB (0.31 MB minified), the
-whole catalog from 18.7 MB to 13.3 MB (6.6 MB minified), and every trimmed / minified page renders pixel-identically to
-the full-CSS page before hydration, after it, and after state changes (`tests/styles.spec.ts`).
+optionally with short custom-property names): the button page goes from 1.22 MB to 0.83 MB (0.47 MB minified), the
+whole catalog from 18.7 MB to 13.3 MB (9.0 MB minified), and every trimmed / minified page renders pixel-identically to
+the full-CSS page before hydration, after it, and after state changes (`tests/styles.spec.ts`), also when definitions
+(`sp-theme` included) arrive after hydration or never (`tests/styles-late.spec.ts`).
 
 ## Layout
 
@@ -70,7 +71,9 @@ The e2e run starts the demo server itself (or reuses one on port 3000; `SWC_SSR_
 picks another port), takes about an hour (four minutes without `tests/styles.spec.ts`, the pixel oracle of the trimmed
 CSS) and rewrites `tests/results/summary.md` plus screenshots under `tests/results/`. Besides the per-component matrix it
 covers the whole-catalog page, the framework-agnostic path (`tests/agnostic.spec.ts`), a localized page
-(`tests/locale.spec.ts`), phones (`tests/mobile.spec.ts`) and the trimmed / minified CSS (`tests/styles.spec.ts`).
+(`tests/locale.spec.ts`), phones (`tests/mobile.spec.ts`) and the trimmed / minified CSS (`tests/styles.spec.ts`, and
+`tests/styles-late.spec.ts` for late definitions, application `--mod-*` overrides and browsers without constructable
+stylesheets).
 Variants:
 
 ```bash

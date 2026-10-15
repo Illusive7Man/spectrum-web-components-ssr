@@ -445,10 +445,53 @@ export function addDefinitions(text: string, into: Set<string>): void {
 }
 
 /**
+ * Index of the `(` of the next `var(` function token at or after `from`, or -1. Only real function tokens count:
+ * strings, comments, escapes and unquoted `url()`s are skipped (`content: "var(--x, y)"` is text, not a reference),
+ * and `var` must not be the end of a longer name (`--my-var(`).
+ */
+function nextVarCall(value: string, from: number): number {
+  let i = from;
+  while (i < value.length) {
+    const code = value.charCodeAt(i);
+    if (code === BACKSLASH) {
+      i += 2;
+      continue;
+    }
+    if (code === SLASH && value.charCodeAt(i + 1) === STAR) {
+      i = skipComment(value, i);
+      continue;
+    }
+    if (code === QUOTE || code === APOSTROPHE) {
+      i = skipString(value, i);
+      continue;
+    }
+    if (code === OPEN_PAREN) {
+      if (isUrlOpen(value, i)) {
+        const after = skipUnquotedUrl(value, i);
+        if (after !== -1) {
+          i = after;
+          continue;
+        }
+      }
+      if (
+        i >= 3 &&
+        value.slice(i - 3, i).toLowerCase() === 'var' &&
+        (i === 3 || (!isNameCode(value.charCodeAt(i - 4)) && value.charCodeAt(i - 4) !== BACKSLASH))
+      ) {
+        return i;
+      }
+    }
+    i++;
+  }
+  return -1;
+}
+
+/**
  * Replaces `var(--name, fallback)` by its fallback for every `--name` with `collapse(name) === true`, recursively
  * (fallbacks may contain further `var()`s). `var()`s without a fallback, or with an empty one, are left alone (an
  * empty substitution would turn the declaration into a parse error, which is not the same as invalid at
- * computed-value time). Returns the input unchanged (same string) when nothing was collapsed.
+ * computed-value time). Text inside strings and comments is never touched. Returns the input unchanged (same string)
+ * when nothing was collapsed.
  */
 export function collapseVars(value: string, collapse: (name: string) => boolean): string {
   if (!/var\(/i.test(value)) {
@@ -457,9 +500,8 @@ export function collapseVars(value: string, collapse: (name: string) => boolean)
   let out = '';
   let last = 0;
   let changed = false;
-  const re = /\bvar\(/gi;
-  for (let match = re.exec(value); match !== null; match = re.exec(value)) {
-    const open = match.index + match[0].length - 1;
+  for (let open = nextVarCall(value, 0); open !== -1; ) {
+    const start = open - 3;
     const close = scanUntil(value, open + 1, value.length, (c) => c === CLOSE_PAREN);
     if (close >= value.length) {
       break;
@@ -470,22 +512,19 @@ export function collapseVars(value: string, collapse: (name: string) => boolean)
     if (comma < inner.length) {
       const fallback = inner.slice(comma + 1);
       if (collapse(name) && fallback.trim() !== '') {
-        out += value.slice(last, match.index) + collapseVars(fallback.trim(), collapse);
+        out += value.slice(last, start) + collapseVars(fallback.trim(), collapse);
         last = close + 1;
-        re.lastIndex = close + 1;
         changed = true;
-        continue;
-      }
-      const collapsed = collapseVars(fallback, collapse);
-      if (collapsed !== fallback) {
-        out += value.slice(last, open + 1) + inner.slice(0, comma + 1) + collapsed + ')';
-        last = close + 1;
-        re.lastIndex = close + 1;
-        changed = true;
-        continue;
+      } else {
+        const collapsed = collapseVars(fallback, collapse);
+        if (collapsed !== fallback) {
+          out += value.slice(last, open + 1) + inner.slice(0, comma + 1) + collapsed + ')';
+          last = close + 1;
+          changed = true;
+        }
       }
     }
-    re.lastIndex = close + 1;
+    open = nextVarCall(value, close + 1);
   }
   return changed ? out + value.slice(last) : value;
 }

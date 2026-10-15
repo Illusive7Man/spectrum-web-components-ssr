@@ -23,7 +23,10 @@ export const SUMMARY_FILE = path.join(RESULTS_DIR, 'summary.md');
  * hover and focus, `styles-hydration` hydration (and flicker) of a trimmed page, `styles-restore` the held (late)
  * hydration against the full CSS, `styles-post` the hydrated trimmed / minified page against the hydrated full-CSS page
  * (normal timing), `styles-post-states` the same after hover / focus / click and DOM changes made after hydration,
- * `styles-release` the client's `removeServerStyles`, `styles-size` the CSS bytes.
+ * `styles-release` the client's `removeServerStyles`, `styles-size` the CSS bytes. tests/styles-late.spec.ts adds
+ * `styles-late` (a definition held back until after hydration, `?late=<tag>`: trimmed / minified equal full before and
+ * after it arrives), `styles-app-mod` (an application stylesheet that sets Spectrum's `--mod-*` hooks) and
+ * `styles-no-cssom` (swc-ssr/client on its path for browsers without constructable stylesheets).
  */
 export type CheckName =
   | 'ssr'
@@ -42,7 +45,10 @@ export type CheckName =
   | 'styles-post'
   | 'styles-post-states'
   | 'styles-release'
-  | 'styles-size';
+  | 'styles-size'
+  | 'styles-late'
+  | 'styles-app-mod'
+  | 'styles-no-cssom';
 export type CheckStatus = 'pass' | 'fail' | 'skip';
 export type MetricValue = string | number | boolean | null;
 export type Metrics = Record<string, MetricValue>;

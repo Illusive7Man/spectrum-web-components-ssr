@@ -249,10 +249,13 @@ stylesheet, only what the rendered page can use.
 export interface StyleOptions {
   mode?: 'full' | 'trimmed';           // default 'full'; any other value counts as 'full'
   trimTheme?: boolean;                 // default true (trimmed mode)
-  references?: Iterable<string>;       // '--name' or '--prefix-*': custom properties the app's own CSS uses
-  undefinedPrefixes?: string[];        // e.g. ['--mod-']: var(--mod-x, V) collapses to V. Default []
-  minifyCustomProperties?: boolean;    // default false; unsafe when the app sets / reads --spectrum-* / --system-*
-  keep?: Array<string | RegExp>;       // selectors (substring of, or RegExp tested against, the selector text) always kept
+  references?: readonly string[] | Iterable<string>;
+                                       // '--name' or '--prefix-*': custom properties the app's own CSS uses; a
+                                       // single string is one entry (not iterated per character)
+  undefinedPrefixes?: readonly string[];  // e.g. ['--mod-']: var(--mod-x, V) collapses to V. Default []
+  minifyCustomProperties?: boolean;    // default false; unsafe when the app sets / reads --spectrum-* names
+  keep?: ReadonlyArray<string | RegExp>;  // selectors (substring of, or RegExp tested against, the selector text)
+                                       // always kept; a single string or RegExp is one entry
 }
 
 export interface StylesReport {        // RenderReport.styles, trimmed mode only
@@ -286,13 +289,27 @@ parsed once and every stylesheet (element tag + stylesheet object) is resolved a
   or at-rule body of the theme, a `style` attribute or another `<style>` of the output, or `references`. The
   components' own custom-property declarations are never pruned (only rules).
 * `undefinedPrefixes`: `var(--prefix-x, V)` becomes `V` in kept rules unless the page defines `--prefix-x` (a kept
-  rule, a `style` attribute, another `<style>`). `var()`s without a fallback are left alone.
-* `minifyCustomProperties`: the custom properties the trimmed stylesheets (theme and components) define are renamed to
-  short names (`--a` ... `--z`, `--A` ... `--Z`, `--aa`, ..., most used first) consistently across the page. Never
-  renamed: `references` names and prefixes, names that occur in a `style` attribute or in CSS the trimmer does not
-  control (other `<style>` elements, stylesheets left complete), and names that are only read (`var(--x)` with no
-  definition on the page, e.g. `--mod-*`: the application may define them). Short names never take a name that occurs
-  on the page or a `references` name or prefix.
+  rule, a `style` attribute, another `<style>`). `var()`s without a fallback are left alone, and so is text inside
+  strings and comments (`content: "var(--mod-x, y)"`).
+* `minifyCustomProperties`: custom properties of the trimmed stylesheets are renamed to short names (`--a` ... `--z`,
+  `--A` ... `--Z`, `--aa`, ..., most used first) consistently across the page - but only names the client can switch
+  in one step: names that only the theme defines (the client bridges the theme's server `<style>`), and names whose
+  every definition and use is inside the stylesheets of one element class or inside one stylesheet several classes
+  share. Never renamed:
+  * Spectrum's public customisation names `--mod-*`, `--highcontrast-*` and `--system-*`, whatever the options: an
+    application sets them (`sp-action-button { --mod-actionbutton-background-color-default: red }`) and reads them,
+    and the components define many of them too (kept rules defined 253 `--mod-*` names on the catalog), so 0.2.0,
+    which renamed those, cut application overrides off until hydration, and for good without JavaScript;
+  * names one element class defines and another reads (`sp-tabs` -> `sp-tab`, `sp-table` -> its rows and cells,
+    `sp-menu-group` -> `sp-menu-item`, `sp-picker` -> `sp-popover`, `sp-number-field` -> `sp-infield-button`,
+    `sp-tray` -> `sp-dialog-wrapper`): a child that is defined or hydrates after its parent was restored would read
+    a short name nothing defines any more;
+  * `references` names and prefixes, names that occur in a `style` attribute or in CSS the trimmer does not control
+    (other `<style>` elements, stylesheets left complete), and names that are only read (`var(--x)` with no
+    definition on the page: the application may define them).
+
+  Short names never take a name that occurs on the page or a `references` name or prefix. The exclusions cost bytes
+  (see the table below: 0.2.0 renamed those names).
 * A stylesheet nothing was dropped from is emitted byte-identical to its `cssText`. A stylesheet whose host cannot be
   determined (markup inside a plain `<template>`) stays complete. When trimming throws, the complete stylesheets are
   used and a `#render` warning `could not trim the stylesheets, the complete stylesheets are used: ...` is reported.
@@ -327,12 +344,25 @@ differing pixels, the buttons lose their background and shrink from 32 to 22.8 p
 * when it is imported (before any definition loads), keeps the marked `<style>` of every `<sp-theme>` (light DOM or
   open shadow roots): it is re-inserted into the theme's shadow root in the microtask after the theme upgraded
   (before the next paint) and removed when the last marked `<style>` in the document is gone (confirmed by a scan), or
-  at the end of `hydrateSpectrum()` when none is left. Elements not hydrated yet - an application that calls
-  `hydrateSpectrum()` late (an Angular bootstrap), elements that hydrate lazily - keep their theme values meanwhile.
-  It is a `<style>` element, not an adopted sheet, because `Theme.adoptStyles()` re-assigns `adoptedStyleSheets`
-  whenever a theme fragment is registered.
-* in a browser without constructable stylesheets (declarative shadow DOM polyfill path, not verified here) the first
-  server `<style>` gets the class's complete CSS text instead.
+  at the end of `hydrateSpectrum()` when none is left - but only from themes that have upgraded. A theme whose
+  definition loads after the components hydrated, or never, keeps its server `<style>` where the server put it (it
+  is all that theme has; its upgrade clears it anyway). Elements not hydrated yet - an application that calls
+  `hydrateSpectrum()` late (an Angular bootstrap), elements that hydrate lazily or are defined late - keep their theme
+  values meanwhile. It is a `<style>` element, not an adopted sheet, because `Theme.adoptStyles()` re-assigns
+  `adoptedStyleSheets` whenever a theme fragment is registered; it does not depend on constructable stylesheets.
+* minified server CSS (`data-swc-styles="minified"`) is handled like the theme: an element restored to its complete
+  sheets keeps its minified `<style>` (its rules are a subset of the adopted sheets, which come later in the cascade
+  and win) until no element runs on minified CSS any more, then it goes with the bridge - elements below it that are
+  not hydrated or not defined yet may still read the short names it defines. While a bridged `<sp-theme>` has not
+  upgraded (`sp-theme` defined late, or never), a minified element is not restored at all: the theme's server
+  `<style>` defines the short names only, so the complete sheets (original names) would find no theme values; it is
+  restored when `sp-theme` gets defined.
+* in a browser without constructable stylesheets (declarative shadow DOM polyfill path) the first server `<style>` gets
+  the class's complete CSS text instead (minified: a `<style>` with the complete text is added after the kept one).
+  Spectrum's `<sp-theme>` itself requires constructable stylesheets; `tests/styles-late.spec.ts` exercises the path
+  with only the client's own feature test failing.
+* on pages without any marked `<style>`, an unmarked server `<style>` is restored only when its text is not the
+  class's `elementStyles` text (lengths are compared first, the text once per class).
 
 **What trimming can break.** The server sees the rendered markup, not the application:
 
@@ -344,17 +374,31 @@ differing pixels, the buttons lose their background and shrink from 32 to 22.8 p
 * **State changes before hydration**: attributes the app sets on Spectrum elements, light-DOM children it inserts
   (`::slotted()` rules) or overlays opened before the element hydrated have no rules until it hydrates; elements whose
   definition never loads keep the trimmed CSS for good. List such selectors in `keep`.
-* **`minifyCustomProperties` is unsafe when the application sets or reads `--spectrum-*` / `--system-*` properties**:
-  an app stylesheet that overrides `--spectrum-accent-background-color-default` on a container, or JavaScript that
-  reads one through `getComputedStyle()`, does not reach the renamed names until the elements hydrate. List such names
-  (or prefixes) in `references`: they are kept and never renamed. A short name can also collide with an app property
-  of the same name (`--a`): pass the app's names through `references` (short names skip them). `undefinedPrefixes` is
-  unsafe for prefixes the application does define (e.g. `--mod-*` overrides in its CSS).
+* **Attributes a component sets in `connectedCallback()`** (or otherwise only on the client: a `role`, a `tabindex`,
+  a state attribute) are not in the server output, so the trimmer sees no element that has them and drops their
+  `:host([attr])` rules. Between the definition (the element connects and sets the attribute) and its hydration the
+  trimmed CSS has no rules for them; the hydrating update restores the complete sheets. If that window shows (a late
+  `hydrateSpectrum()`, lazy hydration), list such selectors in `keep` (e.g. `keep: [':host([role=presentation])']`).
+* **`minifyCustomProperties` is unsafe when the application sets or reads `--spectrum-*` properties**: an app
+  stylesheet that overrides `--spectrum-accent-background-color-default` on a container, or JavaScript that reads one
+  through `getComputedStyle()`, does not reach the renamed names until the elements hydrate. List such names (or
+  prefixes) in `references`: they are kept and never renamed. Spectrum's public `--mod-*` / `--highcontrast-*` /
+  `--system-*` names are never renamed (since 0.2.1). A short name can also collide with an app property of the same
+  name (`--a`): pass the app's names through `references` (short names skip them). `undefinedPrefixes` is unsafe for
+  prefixes the application does define (e.g. `--mod-*` overrides in its CSS).
 * **Theme switches before hydration** (changing `color` / `scale` of `<sp-theme>` while elements still run on minified
   CSS): the bridged server theme keeps the server's values for the renamed names until each element hydrates.
-* Client code that post-processes the Spectrum CSS of the client bundle (an "unused CSS" build step that renames or
-  drops custom properties) makes the client's `elementStyles` differ from the server's output: do not combine it with
-  server-side minification.
+* **A build-time custom-property renamer** (an "unused CSS" / minifier step over the built bundle, e.g. a custom builder
+  that collects `var()` references, deletes unreferenced declarations and renames custom properties) must process the
+  SSR SERVER bundle (the code `renderSpectrum()` runs) exactly like the client bundle, or be disabled while swc-ssr
+  renders. Otherwise the two sides disagree on the names - also in `full` mode: the server writes the original names
+  into the declarative shadow roots, the client's `<sp-theme>` upgrades and adopts its fragments under the renamed
+  names, and every component that has not hydrated yet loses its theme values (the symptom: the server page looks
+  right, the page goes unstyled at hydration). After hydration the client's fallback (the server text differs from the
+  class's `elementStyles`) moves each element to the client's sheets, but elements that hydrate late or never stay
+  broken. Do not combine such a step with server-side minification either: `minifyCustomProperties` renames both sides
+  consistently (the server output and, through restoration and the theme bridge, the client) and is the supported way
+  to get short names.
 
 **Measured** (`.probe/css-stats.ts`, last of 3-4 renders; CSS = text of all `<style>` elements, KiB; render times
 vary with machine load, see docs/DESIGN.md "Style trimming"):
@@ -363,17 +407,18 @@ vary with machine load, see docs/DESIGN.md "Style trimming"):
 |---|---|---|---|---|---|---|
 | `/component/button` | full | 1.22 MB | 1230 KB (98.3 %) | 384 KB | 120 KB | - |
 | | trimmed | 0.83 MB | 823 KB | 77 KB | 79 KB | 9 ms |
-| | minified | 0.31 MB | 298 KB | 31 KB | 13 KB | 14 ms |
+| | minified (0.2.0: 0.31 MB, 298 KB, 13 KB gzip) | 0.47 MB | 454 KB | 46 KB | 15 KB | 9 ms |
 | `/component/picker` | full | 1.32 MB | 1294 KB (95.9 %) | 392 KB | 117 KB | - |
 | | trimmed | 0.52 MB | 475 KB | 54 KB | 56 KB | 16 ms |
-| | minified | 0.28 MB | 231 KB | 23 KB | 24 KB | 23 ms |
+| | minified (0.2.0: 0.28 MB, 231 KB, 24 KB gzip) | 0.38 MB | 330 KB | 32 KB | 43 KB | 19 ms |
 | `/` (59 entries, 1349 elements) | full | 18.66 MB | 18121 KB (94.9 %) | 1937 KB | 1488 KB | - |
 | | trimmed | 13.31 MB | 12616 KB (69.6 % of full) | 997 KB | 996 KB | 0.4-0.6 s |
-| | minified | 6.55 MB | 5689 KB (31.4 %) | 406 KB | 486 KB | 0.5-0.6 s |
-| | minified + `undefinedPrefixes: ['--mod-']` | 5.22 MB | 4329 KB (23.9 %) | 322 KB | 367 KB | 0.25-1.4 s |
+| | minified (0.2.0: 6.55 MB, 5689 KB = 31.4 %, 486 KB gzip) | 9.03 MB | 8224 KB (45.4 %) | 613 KB | 640 KB | 0.4 s |
+| | minified + `undefinedPrefixes: ['--mod-']` (0.2.0: 5.22 MB, 4329 KB = 23.9 %) | 7.70 MB | 6864 KB (37.9 %) | 530 KB | 545 KB | 0.4 s |
 
 The button page renders every variant of `sp-button`, so its two `sp-button` sheets keep 36.6 KB of 41 KB trimmed
-(12.9 KB minified), while its theme goes from 312 KB to 20.4 KB (about 5 KB minified). One-component pages of the
+(19.9 KB minified; 12.9 KB in 0.2.0, which also renamed the `--system-*` / `--highcontrast-*` / `--mod-*` names),
+while its theme goes from 312 KB to 20.4 KB (about 5 KB minified). One-component pages of the
 catalog keep 3-67 % of their CSS (sum over the 59 entry pages: see `tests/results/summary.md`, "Styles").
 
 `ServerTree` (internal, `packages/swc-ssr/src/server/server-tree.ts`): parse5 (htmlparser2 adapter) document of the pass-1
@@ -462,7 +507,9 @@ and `window.__swcSsrMode = 'ssr' | 'csr'`. It also sets `window.__swcSsrDefined 
 page loaded (before `hydrateSpectrum()` runs) and, with `?hydrateDelay=hold`, `window.__swcSsrRelease()` which lets
 `hydrateSpectrum()` run. Client URL options: `?removeStyles=1` (`removeServerStyles: true`), `?hydrateDelay=<ms>|hold`
 (call `hydrateSpectrum()` that much later than the definitions, or when released: the state of an application with a
-late bootstrap), `?agnostic=1`.
+late bootstrap), `?agnostic=1`, `?late=<tag>[,<tag>...]` (the `customElements.define()` of these tags is held back
+until the page calls `window.__swcSsrDefineLate()`, which resolves when they are defined and the page settled:
+definitions that arrive after hydration, or never; `hydrateSpectrum()` waits its timeout for them and warns).
 
 ## Demo catalog entry  (`demo/src/catalog/types.ts`)
 
