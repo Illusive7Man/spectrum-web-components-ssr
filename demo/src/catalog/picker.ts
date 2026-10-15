@@ -8,6 +8,7 @@ export const entry: CatalogEntry = {
   async load() {
     await Promise.all([
       import('@spectrum-web-components/picker/sp-picker.js'),
+      import('@spectrum-web-components/menu/sp-menu.js'),
       import('@spectrum-web-components/menu/sp-menu-item.js'),
       import('@spectrum-web-components/menu/sp-menu-divider.js'),
       import('@spectrum-web-components/field-label/sp-field-label.js'),
@@ -70,6 +71,16 @@ export const entry: CatalogEntry = {
       </sp-picker>
     </div>
 
+    <p style=${CAP}>Deprecated markup: an sp-menu child (the closed overlay is rendered right away)</p>
+    <div style=${ROW}>
+      <sp-picker id="picker-legacy" label="Legacy markup" value="b">
+        <sp-menu>
+          <sp-menu-item value="a">Option A</sp-menu-item>
+          <sp-menu-item value="b">Option B</sp-menu-item>
+        </sp-menu>
+      </sp-picker>
+    </div>
+
     <p style=${CAP}>Sizes</p>
     <div style=${ROW}>
       <sp-picker size="s" label="Small" value="a">
@@ -83,6 +94,6 @@ export const entry: CatalogEntry = {
     </div>
   `,
   notes:
-    'SSR difference: the closed menu starts keyboard focus (tabindex="0") on the selected item after SSR + hydration, on the first item with client-side rendering (there the items are selected only after sp-menu cached them). Closed pickers: the button label is taken from the selected sp-menu-item (found by value in the light DOM and, for sp-picker, via @query(sp-menu) in its own shadow root). The popover stays closed.',
+    'SSR difference: the closed menu starts keyboard focus (tabindex="0") on the selected item after SSR + hydration, on the first item with client-side rendering (there the items are selected only after sp-menu cached them). Closed pickers: the button label is taken from the selected sp-menu-item (found by value in the light DOM and, for sp-picker, via @query(sp-menu) in its own shadow root). The popover stays closed. The deprecated sp-menu child (#picker-legacy) makes the picker render its closed overlay at once: sp-popover on the server and on desktops, sp-tray on phones (tests/mobile.spec.ts).',
   interactive: true,
 };

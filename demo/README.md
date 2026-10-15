@@ -19,7 +19,7 @@ Open <http://localhost:3000/>. `PORT=4000 npm run demo` changes the port.
 The server logs one line per request, including the render time, for example:
 
 ```
-[demo] GET /component/button -> 200 in 41.7 ms | render 38.2 ms (renderSpectrum 35.9 ms), 7 elements, 0 errors, 0 fallbacks
+[demo] GET /component/button -> 200 in 41.7 ms | render 38.2 ms (renderSpectrum 35.9 ms), 7 elements, 0 errors, 0 fallbacks, lang en-US
 ```
 
 ## Routes
@@ -31,6 +31,8 @@ The server logs one line per request, including the render time, for example:
 | `GET /csr`, `GET /csr/:name` | Same page shell, no SSR: `#app` is empty and the client renders the template with lit's `render()`. This is the reference DOM that the e2e tests compare the hydrated DOM against |
 | `?nohydrate=1` on an SSR route | Omits the client `<script>`: the pure server-rendered view (what a visitor without JavaScript, or before the bundle arrives, sees) |
 | `?agnostic=1` on an SSR route | Hydrates with the framework-agnostic path instead of the template path (see below) |
+| `?lang=<tag>` on SSR and CSR routes | Page language (e.g. `?lang=de`). Without it, the request's most preferred `Accept-Language` language, else `en`. Passed to `renderSpectrum({lang})` and written to `<html lang>`, so the client formats like the server |
+| `HEAD` on any path | 200 with an empty body, never renders (health checks / preview monitors). Logged once, then as a per-minute count |
 | `GET /report.json` | `RenderReport` of the last SSR render (per element id: tag, errors, warnings, fallback), plus `loadErrors`. `?component=<name>` (or `*` for the whole catalog) returns the last report of that page, which is race-free when pages are rendered in parallel |
 | `GET /catalog.json` | `[{name, interactive, notes}]` for every catalog entry |
 | `GET /dist/*` | Static files from `demo/public/dist` (the client bundle and its source map) |
@@ -44,7 +46,7 @@ On `/`, a catalog entry whose `load()` throws is left out of the page and listed
 ## Page shell
 
 ```html
-<!doctype html><html lang="en"><head>... <style>/* layout only, see layoutCss in src/page.ts */</style></head>
+<!doctype html><html lang="en"><!-- the page language --><head>... <style>/* layout only, see layoutCss in src/page.ts */</style></head>
 <body>
   <div id="app" data-mode="ssr" data-components="accordion,button">
     <!-- renderSpectrum(pageTemplate(entries)) -->
@@ -83,8 +85,10 @@ client is still loading definitions. The client loads the registration modules o
   `hydrate()`, which wires bindings (properties, event listeners) before any of those updates runs. Each element
   hydrates its own shadow root on its first update, which in turn enables the elements inside it (`hydrate()` removes
   their `defer-hydration`). The template must be exactly the one the server rendered.
-* **Framework-agnostic path** (`?agnostic=1`): `hydrateSpectrum(app)` has no template. It collects every `sp-*` element
-  (document order, including open shadow roots), awaits `customElements.whenDefined` for every tag, removes
+* **Framework-agnostic path** (`?agnostic=1`): `hydrateSpectrum(app)` has no template. It collects every hydration
+  candidate - elements with `defer-hydration`, and custom elements that are `sp-*`, have a shadow root or are already
+  defined, e.g. `<overlay-trigger>` (document order, including open shadow roots) - awaits `customElements.whenDefined`
+  for their tags (not for never-defined framework hosts such as `<app-root>`), removes
   `defer-hydration` top-down in document order and waits for the updates (`updateComplete`) so that elements inside a
   shadow root are only enabled after their host has hydrated. It also works for markup rendered with
   `deferHydration: true`. This is the path an Angular or plain-HTML app would use.

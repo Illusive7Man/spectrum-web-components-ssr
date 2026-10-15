@@ -21,10 +21,11 @@ import {
 } from '../dom-shim/hooks.js';
 import {ServerSlotElement, ServerText, createPlainElement} from '../dom-shim/nodes.js';
 import {constructElement} from './construct.js';
-import {errorMessage, type ElementRecord, type RenderContext} from './context.js';
-import type {ElementReport} from './types.js';
-import {connectElement, hasCommittedRender, markManaged} from './lifecycle.js';
+import {errorMessage, withElementScope, type ElementRecord, type RenderContext} from './context.js';
+import type {ElementReport, LifecycleMode} from './types.js';
+import {connectElement, hasCommittedRender, markManaged, unmarkManaged, withoutAttributeReactions} from './lifecycle.js';
 import {findAdapter} from './adapters/registry.js';
+import {resolveRenderOptions} from './render-options.js';
 import type {LightMutations} from './light-mutations.js';
 import {
   MARKER_ATTRIBUTE,
@@ -53,6 +54,35 @@ export function emptyBacking(): StructureBacking {
 }
 
 const hasOwnBacking = (node: object) => Object.prototype.hasOwnProperty.call(node, BACKING);
+
+/**
+ * Event-path links of plain element facades (`__host` / `__eventTargetParent`, read by the shim's EventTarget),
+ * computed lazily from the tree.
+ *
+ * Retention path (fixed): the links used to be per-facade accessors whose getters were closures over the realm.
+ * V8 keeps an accessor's getter/setter in the hidden class (map) that the property transition creates, and that
+ * descriptor array is shared with the long-lived maps of the same element class (it was reachable from
+ * `document.documentElement`'s map). The first facade of the process therefore pinned its realm - and with it a
+ * whole render - forever. All facades now share the same two accessor functions, which find their realm and tree
+ * node in a WeakMap.
+ */
+const eventLinks = new WeakMap<object, {realm: TreeRealm; node: TreeNode}>();
+const HOST_LINK: PropertyDescriptor = {
+  get(this: object) {
+    const link = eventLinks.get(this);
+    return link ? link.realm.hostInstanceOf(link.node) : undefined;
+  },
+  set() {},
+  configurable: true,
+};
+const EVENT_PARENT_LINK: PropertyDescriptor = {
+  get(this: object) {
+    const link = eventLinks.get(this);
+    return link ? link.realm.eventParentOf(link.node) : undefined;
+  },
+  set() {},
+  configurable: true,
+};
 
 /**
  * Attaches (or reuses) the element's shadow root, gives it `backing`, and makes it the Lit `renderRoot`.
@@ -101,8 +131,14 @@ export class TreeRealm {
   private readonly nodesByFacade = new WeakMap<object, TreeNode>();
   private readonly constructing = new Set<TreeElementNode>();
   private readonly failed = new Set<TreeElementNode>();
+  /** Nodes whose element opted out of SSR (`renderOptions` `disableSsr`): never pooled, plain facades. */
+  private readonly ssrDisabled = new Set<TreeElementNode>();
+  /** Effective lifecycle of each pooled instance (class, adapter, options and its `renderOptions`). */
+  private readonly modes = new WeakMap<HTMLElement, LifecycleMode>();
   /** Attribute changes made on plain elements during this pass (see light-mutations.ts). */
   readonly lightMutations: LightMutations = new Map();
+  /** Set when the render is over: no further instances are created (see `dispose`). */
+  private disposed = false;
 
   constructor(
     private readonly context: RenderContext,
@@ -152,16 +188,9 @@ export class TreeRealm {
     setBacking(wrapper, this.backingFor(node));
     this.recordMutations(wrapper, node);
     // Event-path links used by the shim's EventTarget (computed lazily from the tree).
-    Object.defineProperty(wrapper, '__host', {
-      get: () => this.hostInstanceOf(node),
-      set: () => {},
-      configurable: true,
-    });
-    Object.defineProperty(wrapper, '__eventTargetParent', {
-      get: () => this.eventParentOf(node),
-      set: () => {},
-      configurable: true,
-    });
+    eventLinks.set(wrapper, {realm: this, node});
+    Object.defineProperty(wrapper, '__host', HOST_LINK);
+    Object.defineProperty(wrapper, '__eventTargetParent', EVENT_PARENT_LINK);
     const shadow = this.tree.shadowOf(node);
     if (shadow) {
       attachShadowRoot(wrapper, this.shadowBackingFor(shadow));
@@ -418,10 +447,13 @@ export class TreeRealm {
 
   recordOf(node: TreeElementNode): ElementRecord | undefined {
     const id = this.tree.idOf(node);
-    return id === undefined ? undefined : this.previous.records.get(id);
+    return id === undefined || this.disposed ? undefined : this.previous.records.get(id);
   }
 
   instanceForKey(key: string): HTMLElement | undefined {
+    if (this.disposed) {
+      return undefined;
+    }
     const pooled = this.context.pool.get(key);
     if (pooled) {
       return pooled;
@@ -433,7 +465,7 @@ export class TreeRealm {
 
   instanceForNode(node: TreeElementNode): HTMLElement | undefined {
     const existing = this.instances.get(node);
-    if (existing) {
+    if (existing || this.disposed) {
       return existing;
     }
     const record = this.recordOf(node);
@@ -449,7 +481,7 @@ export class TreeRealm {
 
   /** Pass-1 instances found in recorded property values are replaced by their pass-2 counterparts. */
   translate(value: unknown): unknown {
-    if (value !== null && typeof value === 'object') {
+    if (value !== null && typeof value === 'object' && !this.disposed) {
       const key = this.previous.keyByInstance.get(value);
       if (key !== undefined) {
         return this.instanceForKey(key) ?? value;
@@ -460,10 +492,10 @@ export class TreeRealm {
 
   private createInstance(node: TreeElementNode, record: ElementRecord): HTMLElement | undefined {
     const ctor = (globalThis as any).customElements.get(record.tag) as (new () => HTMLElement) | undefined;
-    if (!ctor) {
+    if (!ctor || this.disposed) {
       return undefined;
     }
-    if (this.constructing.has(node) || this.failed.has(node)) {
+    if (this.constructing.has(node) || this.failed.has(node) || this.ssrDisabled.has(node)) {
       return undefined;
     }
     const report = this.context.reportFor(record.key, record.tag);
@@ -503,30 +535,61 @@ export class TreeRealm {
     const adapter = findAdapter(record.tag);
     if (adapter?.prepare) {
       try {
-        adapter.prepare(element, {id: -1, pass: 2, tree: this.tree, report});
+        // Not rendered in this pass yet: no id (review L3: real pass number, previous id and key).
+        adapter.prepare(element, {
+          id: -1,
+          pass: this.context.pass,
+          key: record.key,
+          previousId: record.id,
+          tree: this.tree,
+          report,
+        });
       } catch (error) {
         report.errors.push(`adapter prepare: ${errorMessage(error)}`);
       }
     }
     this.attach(element, node);
-    const mode = this.context.lifecycleFor(record.tag, adapter?.lifecycle);
-    if (mode === 'full') {
+    // The class-level mode decides whether the shadow content is hidden until the first update (`markManaged`)
+    // already while the attributes / properties are applied; the element's render options can only lower it.
+    const classMode = this.context.lifecycleFor(record.tag, adapter?.lifecycle, ctor);
+    if (classMode === 'full') {
       markManaged(element, report);
     }
-    for (const [name, value] of record.attributes) {
-      try {
-        setAttributeAndNotify(element, name, value);
-      } catch (error) {
-        report.errors.push(`setAttribute(${name}): ${errorMessage(error)}`);
+    withElementScope(report, () => {
+      for (const [name, value] of record.attributes) {
+        try {
+          setAttributeAndNotify(element, name, value);
+        } catch (error) {
+          report.errors.push(`setAttribute(${name}): ${errorMessage(error)}`);
+        }
       }
-    }
-    for (const [name, value] of record.properties) {
-      try {
-        (element as any)[name] = this.translate(value);
-      } catch (error) {
-        report.errors.push(`property ${name}: ${errorMessage(error)}`);
+      for (const [name, value] of record.properties) {
+        try {
+          (element as any)[name] = this.translate(value);
+        } catch (error) {
+          report.errors.push(`property ${name}: ${errorMessage(error)}`);
+        }
       }
+    });
+    // Review H1: upstream `LitElementRenderer.renderOptions` apply to pre-instantiated elements too, evaluated (as
+    // upstream does) once the element has its attributes, before anything connects or updates it.
+    const renderOptions = resolveRenderOptions(element, report);
+    if (renderOptions?.disableSsr) {
+      // No pooling, no connect, no lifecycle: the renderer builds the element as upstream does and renders it
+      // without a shadow root; the other elements see a plain facade of it.
+      this.ssrDisabled.add(node);
+      this.context.pool.delete(record.key);
+      this.instances.delete(node);
+      this.facades.delete(node);
+      this.nodesByFacade.delete(element);
+      unmarkManaged(element);
+      return undefined;
     }
+    const mode = this.context.lifecycleFor(record.tag, adapter?.lifecycle, ctor, renderOptions);
+    if (mode !== 'full') {
+      unmarkManaged(element);
+    }
+    this.modes.set(element, mode);
     return element;
   }
 
@@ -546,18 +609,35 @@ export class TreeRealm {
   }
 
   /**
+   * Called when the render is over. The node objects keep their structure backings: like elements removed from a
+   * browser document they still answer DOM queries (component code may still run from async continuations, e.g.
+   * `slider/src/Slider.js` `getUpdateComplete()` reads its `@query` number field after a dynamic import resolved).
+   * What only the render needed is released (the context drops its pool, records and link to the previous pass),
+   * and no new instances are created for nodes nobody asked for yet.
+   */
+  dispose(): void {
+    this.disposed = true;
+    this.constructing.clear();
+    this.failed.clear();
+    this.ssrDisabled.clear();
+    this.lightMutations.clear();
+  }
+
+  /**
    * Creates every element of the pass-1 tree (document order: element, its shadow content, its light children),
    * then connects them in the same order: like a browser inserting a parsed fragment, all elements exist before
    * the first `connectedCallback` runs.
    */
   preinstantiate(): Array<{element: HTMLElement; report: ElementReport}> {
-    const created: HTMLElement[] = [];
+    // A Set (review L4: `created.includes(element)` made this quadratic in the number of elements).
+    const unique = new Set<HTMLElement>();
     for (const node of this.tree.markedNodes()) {
       const element = this.instanceForNode(node);
-      if (element && !created.includes(element)) {
-        created.push(element);
+      if (element) {
+        unique.add(element);
       }
     }
+    const created = [...unique];
     // Browser order: the elements of one tree scope connect and update before the elements inside their shadow
     // roots, which only come to life when their host renders (client-side rendering) or hydrates (SSR + hydration).
     // E.g. a picker's light-DOM menu items update before the sp-menu in the picker's shadow root, which decides
@@ -573,9 +653,9 @@ export class TreeRealm {
       const key = this.context.keyByInstance.get(element)!;
       const tag = element.localName;
       const report = this.context.reportFor(key, tag);
-      const mode = this.context.lifecycleFor(tag, findAdapter(tag)?.lifecycle);
+      const mode = this.modes.get(element) ?? this.context.lifecycleFor(tag, findAdapter(tag)?.lifecycle);
       if (mode !== 'none') {
-        connectElement(element, report);
+        connectElement(element, report, this.context.session);
       }
       result.push({element, report});
     }
@@ -586,7 +666,8 @@ export class TreeRealm {
 /** `setAttribute` + `attributeChangedCallback` for observed attributes (what a browser parser would do). */
 export function setAttributeAndNotify(element: any, name: string, value: string): void {
   const old = element.getAttribute(name);
-  element.setAttribute(name, value);
+  // Notified explicitly below (also for elements that are not connected yet).
+  withoutAttributeReactions(() => element.setAttribute(name, value));
   const observed: string[] = element.constructor?.observedAttributes ?? [];
   if (old !== value && observed.includes(name) && typeof element.attributeChangedCallback === 'function') {
     element.attributeChangedCallback(name, old, value);

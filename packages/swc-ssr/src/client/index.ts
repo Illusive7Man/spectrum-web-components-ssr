@@ -8,6 +8,7 @@ import {hydrate} from '@lit-labs/ssr-client';
 import {render} from 'lit-html';
 import {hydrateShadowRoots} from '@webcomponents/template-shadowroot';
 import {installHydrationHooks} from './hooks.js';
+import {DEFER_ATTRIBUTE, isHydrationCandidate, tagsToDefine} from './elements.js';
 
 export {registerHydrationAdapter} from './hooks.js';
 export type {HydrationAdapter} from './hooks.js';
@@ -27,7 +28,11 @@ export interface HydrationReport {
   warnings: string[];
   /** Tag name of every element that still carries `defer-hydration` once hydration has settled (one entry per element). */
   deferred: string[];
-  /** Number of `sp-*` elements that have a (declarative) shadow root, are upgraded and are no longer deferred. */
+  /**
+   * Number of custom elements (Spectrum's `sp-*` ones and the others, e.g. `<overlay-trigger>`; see
+   * `isHydrationCandidate` in `elements.ts`) that have a (declarative) shadow root, are upgraded and are no longer
+   * deferred.
+   */
   hydratedCount: number;
   durationMs: number;
 }
@@ -36,7 +41,8 @@ export interface HydrateSpectrumOptions {
   /**
    * A lit `TemplateResult` equal to the one that was rendered on the server. When given,
    * `hydrate(template, root)` from `@lit-labs/ssr-client` is used. Otherwise the framework-agnostic path runs:
-   * `defer-hydration` is removed from the `sp-*` elements top-down, in document order.
+   * `defer-hydration` is removed from the elements that carry it (Spectrum's and any other server-rendered custom
+   * element, e.g. `<overlay-trigger>`) top-down, in document order.
    *
    * Works with server output rendered with either `deferHydration` setting. With `true` (recommended), no element
    * hydrates before `hydrateSpectrum()` runs: the elements of the outermost tree scope (light DOM below `root`) are
@@ -48,8 +54,10 @@ export interface HydrateSpectrumOptions {
    */
   template?: unknown;
   /**
-   * Default `true`: await `customElements.whenDefined()` for the `sp-*` tags of the light DOM below `root` first, and
-   * after hydrating for tags inside shadow roots (often defined lazily by their host's `render()`).
+   * Default `true`: await `customElements.whenDefined()` for the custom element tags of the light DOM below `root`
+   * first, and after hydrating for tags inside shadow roots (often defined lazily by their host's `render()`). Only
+   * tags of elements that need hydrating are awaited (see `isHydrationCandidate` in `elements.ts`: deferred,
+   * server-rendered or `sp-*`), not, e.g., the component hosts of a framework that never defines them.
    */
   whenDefined?: boolean;
   /**
@@ -59,7 +67,6 @@ export interface HydrateSpectrumOptions {
   timeoutMs?: number;
 }
 
-const DEFER_ATTRIBUTE = 'defer-hydration';
 const DEFAULT_TIMEOUT_MS = 3000;
 /** Safety net for the convergence loops; real pages need 2-4 rounds. */
 const MAX_ROUNDS = 50;
@@ -238,18 +245,26 @@ function adoptEarlyCapture(report: HydrationReport): void {
  * Tree helpers
  * -------------------------------------------------------------------------------------------------------------- */
 
-const isSpectrumTag = (localName: string): boolean => localName.startsWith('sp-');
 const isDeferred = (el: Element): boolean => el.hasAttribute(DEFER_ATTRIBUTE);
+const isDefined = (localName: string): boolean => customElements.get(localName) !== undefined;
 
 /**
- * Every `sp-*` element under (and including) `root`, in document order, descending into open shadow roots.
+ * The elements hydration takes care of (`isHydrationCandidate`): every element carrying `defer-hydration` and the
+ * custom elements that are server-rendered, defined or `sp-*` - not only `sp-*` tags: Spectrum has custom elements
+ * without the prefix (`<overlay-trigger>`, `overlay/overlay-trigger.js`), which the framework-agnostic path must
+ * enable as well. One predicate for the collection, the definition waits and the report.
+ */
+const isCandidate = (el: Element): boolean => isHydrationCandidate(el, isDefined);
+
+/**
+ * Every candidate element under (and including) `root`, in document order, descending into open shadow roots.
  * A shadow host is listed before the elements of its shadow tree, which is listed before the host's light children,
  * so a parent always precedes its descendants.
  */
-function collectSpectrumElements(root: Element | ShadowRoot): Element[] {
+function collectCandidates(root: Element | ShadowRoot): Element[] {
   const found: Element[] = [];
   const visit = (el: Element): void => {
-    if (isSpectrumTag(el.localName)) found.push(el);
+    if (isCandidate(el)) found.push(el);
     if (el.shadowRoot) walk(el.shadowRoot);
   };
   const walk = (scope: Element | ShadowRoot): void => {
@@ -304,10 +319,11 @@ function settledWithin(promise: Promise<unknown>, ms: number): Promise<boolean> 
 }
 
 /**
- * Awaits the definitions of the `sp-*` tags under `root`: only those of the outermost tree scope (the light DOM the
- * application is responsible for) when `outermostOnly`, otherwise also the ones inside (open) shadow roots, which
- * are often defined lazily by their host's first render (e.g. `color-field/src/ColorField.js` imports
- * `sp-color-handle` in `render()`). Returns whether any definition was missing when called.
+ * Awaits the definitions of the candidate custom elements under `root` (see `isCandidate`): only those of the
+ * outermost tree scope (the light DOM the application is responsible for) when `outermostOnly`, otherwise also the
+ * ones inside (open) shadow roots, which are often defined lazily by their host's first render (e.g.
+ * `color-field/src/ColorField.js` imports `sp-color-handle` in `render()`). Returns whether any definition was
+ * missing when called.
  */
 async function waitForDefinitions(
   root: Element,
@@ -315,9 +331,8 @@ async function waitForDefinitions(
   timeoutMs: number,
   outermostOnly: boolean,
 ): Promise<boolean> {
-  const elements = outermostOnly ? [root, ...Array.from(root.querySelectorAll('*'))] : collectSpectrumElements(root);
-  const tags = new Set(elements.map((el) => el.localName).filter(isSpectrumTag));
-  const missing = [...tags].filter((tag) => customElements.get(tag) === undefined);
+  const elements = outermostOnly ? [root, ...Array.from(root.querySelectorAll('*'))] : collectCandidates(root);
+  const missing = tagsToDefine(elements, isDefined).filter((tag) => !isDefined(tag));
   await Promise.all(
     missing.map(async (tag) => {
       const defined = await settledWithin(customElements.whenDefined(tag), timeoutMs);
@@ -371,8 +386,8 @@ async function settleElements(elements: Element[], report: HydrationReport, time
 async function settleTree(root: Element, report: HydrationReport, timeoutMs: number): Promise<void> {
   let previous = '';
   for (let round = 0; round < MAX_ROUNDS; round++) {
-    await settleElements(collectSpectrumElements(root), report, timeoutMs);
-    const after = collectSpectrumElements(root);
+    await settleElements(collectCandidates(root), report, timeoutMs);
+    const after = collectCandidates(root);
     const signature = `${after.length}:${after.filter(isDeferred).length}`;
     if (signature === previous) return;
     previous = signature;
@@ -400,7 +415,7 @@ function hostHasRendered(el: Element): boolean {
 async function hydrateAgnostic(root: Element, report: HydrationReport, timeoutMs: number): Promise<void> {
   const deadline = performance.now() + timeoutMs;
   for (let round = 0; round < MAX_ROUNDS * 10; round++) {
-    const pending = collectSpectrumElements(root).filter(isDeferred);
+    const pending = collectCandidates(root).filter(isDeferred);
     if (pending.length === 0) break;
     const eligible = pending.filter((el) => hasEnabledScope(el) && hostHasRendered(el));
     if (eligible.length === 0) {
@@ -466,7 +481,7 @@ export async function hydrateSpectrum(
   } catch (error) {
     reportFailure(report, 'hydrateSpectrum() failed', error);
   } finally {
-    const elements = collectSpectrumElements(root);
+    const elements = collectCandidates(root);
     report.deferred = elements.filter(isDeferred).map((el) => el.localName);
     report.hydratedCount = elements.filter((el) => el.shadowRoot !== null && isUpgraded(el) && !isDeferred(el)).length;
     report.durationMs = Math.round((performance.now() - started) * 10) / 10;

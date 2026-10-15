@@ -17,7 +17,12 @@
     "demo:dev": "tsx demo/src/server.ts",
     "test:unit": "tsx --test packages/swc-ssr/test/*.test.ts",
     "test:e2e": "playwright test",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build:pkg": "tsc -p packages/swc-ssr/tsconfig.build.json",
+    "clean:pkg": "node -e \"require('node:fs').rmSync('packages/swc-ssr/dist',{recursive:true,force:true})\"",
+    "pkg:prepare": "node scripts/prepare-publish.mjs",
+    "pkg:restore": "node scripts/prepare-publish.mjs --restore",
+    "pkg:verify": "node scripts/verify-package.mjs"
   },
   "dependencies": {
     "@lit-labs/ssr": "4.1.0",

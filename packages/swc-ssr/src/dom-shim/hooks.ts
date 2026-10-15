@@ -146,3 +146,30 @@ export function setListenerLog(log: ListenerRecord[] | undefined): ListenerRecor
 export function logListener(record: ListenerRecord): void {
   listenerLog?.push(record);
 }
+
+/* ------------------------------------------------------------------------------------------------------------ *
+ * Dropped mutations
+ * ------------------------------------------------------------------------------------------------------------ */
+
+/**
+ * `operation` was called on `target`, a node whose structure comes from a server tree (or that was rendered without
+ * one): such nodes cannot be mutated, the call had no effect. `node` is the node that was to be inserted / removed.
+ */
+export type DroppedMutationHandler = (target: object, operation: string, node?: unknown) => void;
+
+let droppedMutationHandler: DroppedMutationHandler | undefined;
+
+/**
+ * The server renderer sets a handler while a render is in progress, so that structure changes components make at
+ * runtime (e.g. `sp-table` inserting checkbox cells into its rows) are reported instead of silently missing from
+ * the output. Returns the previous handler.
+ */
+export function setDroppedMutationHandler(handler: DroppedMutationHandler | undefined): DroppedMutationHandler | undefined {
+  const previous = droppedMutationHandler;
+  droppedMutationHandler = handler;
+  return previous;
+}
+
+export function reportDroppedMutation(target: object, operation: string, node?: unknown): void {
+  droppedMutationHandler?.(target, operation, node);
+}

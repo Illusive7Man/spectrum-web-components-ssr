@@ -8,13 +8,16 @@
  *  - catches errors per element (reported, never fatal) and falls back to the pass-1 shadow when `render()`
  *    fails in pass 2.
  *
- * Library-agnostic: it matches every LitElement class; Spectrum-specific behaviour comes from adapters.
+ * Library-agnostic: it matches every LitElement class (all of them get the light-DOM / shadow facades). The server
+ * lifecycle (`full`) is the default only for managed classes (Spectrum's, see `RenderSpectrumOptions.
+ * isManagedClass`); other Lit elements keep upstream semantics unless `lifecycleByTag` opts them in.
+ * `LitElementRenderer.renderOptions` are honoured as upstream does. Spectrum-specific behaviour comes from adapters.
  */
 import {LitElementRenderer} from '@lit-labs/ssr/lib/lit-element-renderer.js';
 import {renderValue, type RenderInfo} from '@lit-labs/ssr/lib/render-value.js';
 import type {ThunkedRenderResult} from '@lit-labs/ssr/lib/render-result.js';
 import {overrideRegistryGet} from './construct.js';
-import {errorMessage, getCurrentRenderContext, runInContext} from './context.js';
+import {errorMessage, getCurrentRenderContext, runInContext, withElementScope} from './context.js';
 import {
   connectElement,
   hasPendingUpdate,
@@ -22,18 +25,28 @@ import {
   runBaseUpdate,
   runFullUpdate,
   settle,
+  suspendAttributeReactions,
+  unmarkManaged,
+  withoutAttributeReactions,
 } from './lifecycle.js';
 import {materialize} from './materialize.js';
-import {buildElement, planElement, prepareFreshElement, sameValue, type ElementPlan} from './plan.js';
+import {
+  adapterContextOf,
+  buildElement,
+  isElementPartMarker,
+  planElement,
+  prepareFreshElement,
+  sameValue,
+  stashStaticAttributes,
+  type ElementPlan,
+} from './plan.js';
+import {resolveRenderOptions} from './render-options.js';
 import {MARKER_ATTRIBUTE} from './server-tree.js';
-import {isElementPartMarker} from './plan.js';
 import type {AdapterContext} from './types.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const MAX_UPDATE_CYCLES = 3;
-
-type RenderOptionsCallback = (element: HTMLElement) => {connectedCallback?: boolean; disableSsr?: boolean} | undefined;
 
 export class SpectrumElementRenderer extends LitElementRenderer {
   declare ssrPlan: ElementPlan | undefined;
@@ -42,8 +55,13 @@ export class SpectrumElementRenderer extends LitElementRenderer {
   declare ssrLifecycle: Promise<void> | undefined;
   declare ssrDisabled: boolean;
 
-  static override matchesClass(ctor: typeof HTMLElement): boolean {
-    return !!(ctor as unknown as {_$litElement$?: boolean})._$litElement$;
+  static override matchesClass(ctor: typeof HTMLElement, tagName?: string, attributes?: Map<string, string>): boolean {
+    const matches = !!(ctor as unknown as {_$litElement$?: boolean})._$litElement$;
+    if (matches && tagName !== undefined) {
+      // The constructor only gets the tag name; the static attributes are part of the element's key (plan.ts).
+      stashStaticAttributes(tagName, attributes);
+    }
+    return matches;
   }
 
   constructor(tagName: string) {
@@ -56,15 +74,19 @@ export class SpectrumElementRenderer extends LitElementRenderer {
     }
     // LitElementRenderer's constructor constructs the element itself; hand it ours instead.
     const restore = overrideRegistryGet(tagName, element);
+    // (Upstream reflects ElementInternals ARIA attributes here; the renderer's writes are not attribute reactions.)
+    const resume = suspendAttributeReactions();
     try {
       super(tagName);
     } finally {
+      resume();
       restore();
     }
     this.ssrPlan = plan;
     this.ssrKey = plan?.key;
     this.ssrBroken = failed;
     this.ssrLifecycle = undefined;
+    this.ssrDisabled = false;
     if (!plan?.instance) {
       prepareFreshElement(this.element, plan);
     }
@@ -75,10 +97,7 @@ export class SpectrumElementRenderer extends LitElementRenderer {
   }
 
   private adapterContext(): AdapterContext | undefined {
-    const plan = this.ssrPlan;
-    return plan
-      ? {id: plan.id, pass: plan.context.pass === 1 ? 1 : 2, tree: plan.context.tree, report: plan.report}
-      : undefined;
+    return this.ssrPlan ? adapterContextOf(this.ssrPlan) : undefined;
   }
 
   override setAttribute(name: string, value: string): void {
@@ -93,7 +112,8 @@ export class SpectrumElementRenderer extends LitElementRenderer {
       return;
     }
     try {
-      super.setAttribute(name, value);
+      // Upstream's setAttribute notifies `attributeChangedCallback` itself (no second, browser-like reaction).
+      withElementScope(this.report, () => withoutAttributeReactions(() => super.setAttribute(name, value)));
     } catch (error) {
       this.report?.errors.push(`setAttribute(${name}): ${errorMessage(error)}`);
     }
@@ -110,7 +130,7 @@ export class SpectrumElementRenderer extends LitElementRenderer {
       return;
     }
     try {
-      super.setProperty(name, value);
+      withElementScope(this.report, () => super.setProperty(name, value));
     } catch (error) {
       this.report?.errors.push(`property ${name}: ${errorMessage(error)}`);
     }
@@ -129,15 +149,11 @@ export class SpectrumElementRenderer extends LitElementRenderer {
     }
     const element = this.element as any;
     const plan = this.ssrPlan;
-    let renderOptions: ReturnType<RenderOptionsCallback>;
-    for (const callback of ((LitElementRenderer as any).renderOptions ?? []) as RenderOptionsCallback[]) {
-      renderOptions = callback(element);
-      if (renderOptions) {
-        break;
-      }
-    }
+    const renderOptions = resolveRenderOptions(element, plan?.report);
     if (renderOptions?.disableSsr) {
+      // Upstream semantics: no connectedCallback, no update, no shadow root (see renderShadow).
       this.ssrDisabled = true;
+      unmarkManaged(element);
       return;
     }
     if (!plan) {
@@ -148,12 +164,20 @@ export class SpectrumElementRenderer extends LitElementRenderer {
       runBaseUpdate(element, {id: -1, tagName: this.tagName, errors: [], warnings: [], fallback: false});
       return;
     }
-    const {report, mode, context} = plan;
-    context.session.lastReport = report;
-    if (mode !== 'none') {
-      connectElement(element, report);
+    const {report, context} = plan;
+    // The class-level mode refined by the element's render options (review H1 / M1, see `lifecycleFor`).
+    plan.mode = context.lifecycleFor(plan.tag, plan.adapter?.lifecycle, element.constructor, renderOptions);
+    if (plan.mode !== 'full') {
+      unmarkManaged(element);
     }
-    if (mode !== 'full') {
+    if (plan.instance) {
+      this.removeStaleAttributes();
+    }
+    context.session.lastReport = report;
+    if (plan.mode !== 'none') {
+      connectElement(element, report, context.session);
+    }
+    if (plan.mode !== 'full') {
       runBaseUpdate(element, report);
       this.beforeRender();
       return;
@@ -164,7 +188,39 @@ export class SpectrumElementRenderer extends LitElementRenderer {
       return;
     }
     runFullUpdate(element, report);
-    this.ssrLifecycle = this.finishLifecycle();
+    this.ssrLifecycle = withElementScope(report, () => this.finishLifecycle());
+  }
+
+  /**
+   * Review M3: a pre-instantiated element got the attributes upstream set on the previous pass's element with the
+   * same key. Attributes of that record which upstream did not set again in this pass (e.g. a `?disabled=${...}`
+   * binding that is false now) are removed, unless the component changed them itself in the meantime.
+   */
+  private removeStaleAttributes(): void {
+    const plan = this.ssrPlan!;
+    const previous = plan.previousRecord;
+    const current = plan.record;
+    if (!previous || !current) {
+      return;
+    }
+    const element = this.element as any;
+    for (const [name, value] of previous.attributes) {
+      if (current.attributes.has(name) || element.getAttribute(name) !== value) {
+        continue;
+      }
+      try {
+        withElementScope(plan.report, () => {
+          const old = element.getAttribute(name);
+          withoutAttributeReactions(() => element.removeAttribute(name));
+          const observed: string[] = element.constructor?.observedAttributes ?? [];
+          if (observed.includes(name) && typeof element.attributeChangedCallback === 'function') {
+            element.attributeChangedCallback(name, old, null);
+          }
+        });
+      } catch (error) {
+        plan.report.errors.push(`removeAttribute(${name}): ${errorMessage(error)}`);
+      }
+    }
   }
 
   /** The asynchronous part of the `full` lifecycle: settle frames/microtasks, re-run pending updates. */
@@ -190,6 +246,7 @@ export class SpectrumElementRenderer extends LitElementRenderer {
         });
       }
     } catch (error) {
+      context.session.checkAborted();
       report.errors.push(`lifecycle: ${errorMessage(error)}`);
     }
     runInContext(context, () => this.beforeRender());
@@ -202,7 +259,7 @@ export class SpectrumElementRenderer extends LitElementRenderer {
       return;
     }
     try {
-      plan.adapter.beforeRender(this.element as HTMLElement, adapterContext);
+      withElementScope(plan.report, () => plan.adapter!.beforeRender!(this.element as HTMLElement, adapterContext));
     } catch (error) {
       plan.report.errors.push(`adapter beforeRender: ${errorMessage(error)}`);
     }
@@ -237,7 +294,7 @@ export class SpectrumElementRenderer extends LitElementRenderer {
     const element = this.element as any;
     let value: unknown;
     try {
-      value = materialize(element.render());
+      value = materialize(withElementScope(plan?.report, () => element.render()));
     } catch (error) {
       plan?.report.errors.push(`render: ${errorMessage(error)}`);
       const fallback = this.fallbackShadow();
@@ -245,6 +302,10 @@ export class SpectrumElementRenderer extends LitElementRenderer {
         return fallback;
       }
       value = undefined;
+    }
+    if (plan) {
+      // From here on the element's markup is out; a later update of it would be lost (see `findLateUpdates`).
+      plan.context.rendered.push({element, report: plan.report});
     }
     if (plan?.adapter?.afterRender && plan.context.pass !== 1) {
       try {
@@ -273,13 +334,17 @@ export class SpectrumElementRenderer extends LitElementRenderer {
     return super.renderLight(renderInfo);
   }
 
-  /** Pass 2: the element's pass-1 shadow content (already server-rendered markup). */
+  /**
+   * Pass >= 2: the element's shadow content of the previous pass (already server-rendered markup). Review L1: the
+   * `data-swc-ssr` markers inside it are previous-pass ids, which would collide with this pass's ids (light-DOM
+   * mutation targets, the next pass's tree); they are left out, so the fallback content counts as plain markup.
+   */
   private fallbackShadow(): ThunkedRenderResult | undefined {
     const plan = this.ssrPlan;
     if (!plan || plan.context.pass === 1 || !plan.previousRecord || !plan.context.tree) {
       return undefined;
     }
-    const markup = plan.context.tree.serializeShadow(plan.previousRecord.id);
+    const markup = plan.context.tree.serializeShadow(plan.previousRecord.id, {stripMarkers: true});
     if (markup === undefined) {
       return undefined;
     }
@@ -287,3 +352,4 @@ export class SpectrumElementRenderer extends LitElementRenderer {
     return [markup];
   }
 }
+

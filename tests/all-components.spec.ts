@@ -1,10 +1,13 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import {expect, test, type Page, type TestInfo} from '@playwright/test';
 import {awaitHydration, collectConsole, sectionSelector} from './helpers/browser.ts';
 import {allEntries} from './helpers/catalog.ts';
 import {expectNone, fetchRenderReport, truncateList} from './helpers/checks.ts';
-import {collectDeferredHydration, settleTree} from './helpers/dom.ts';
+import {unifiedDiff} from './helpers/diff.ts';
+import {collectDeferredHydration, serializeTree, settleTree} from './helpers/dom.ts';
 import {distinctSpTags, extractSection, hasDeclarativeShadowRoot, SHADOWLESS_TAGS} from './helpers/html.ts';
-import {errorMessage, recordResult, step, wasRecorded, type CheckName} from './helpers/results.ts';
+import {errorMessage, FIDELITY_DIR, recordResult, step, wasRecorded, type CheckName} from './helpers/results.ts';
 import {ALL_COMPONENTS_ROW} from './helpers/summary.ts';
 
 /**
@@ -13,6 +16,9 @@ import {ALL_COMPONENTS_ROW} from './helpers/summary.ts';
  * the whole page may take a third pass, see packages/swc-ssr/test/third-pass.test.ts), so the page is checked as a
  * whole: SSR markup and render report, hydration, and the client-rendered reference. Results are recorded as the
  * `all-components` row of the "Pages" table in tests/results/summary.md (not counted as a component).
+ * A soft check compares the hydrated slider section of `/` with the hydrated `/component/slider` section (the same
+ * template rendered alone; attribute values verbatim, see `rawAttributeValues`): it is recorded in the Pages table
+ * and never fails the run.
  *
  * Always covers the full catalog: the SWC_SSR_COMPONENTS / SWC_SSR_SMOKE filters select per-component tests only.
  */
@@ -26,6 +32,9 @@ const PAGE_HYDRATION_TIMEOUT_MS = 180_000;
 const PAGE_SETTLE_TIMEOUT_MS = 20_000;
 
 const HYDRATION_WARNING = /hydrat/i;
+
+/** The section compared between `/` and its own component page (soft check). */
+const FIDELITY_SECTION = 'slider';
 
 const CHECK_BY_TITLE: Record<string, CheckName> = {
   'GET / ssr markup': 'ssr',
@@ -138,13 +147,59 @@ test.describe(ROW, () => {
       ctx.metrics.consoleErrors = logs.errors.length;
 
       expectNone(missing, 'catalog sections missing from the hydrated page');
-      expect.soft(report.hydratedCount, 'number of hydrated sp-* elements').toBeGreaterThan(0);
+      expect.soft(report.hydratedCount, 'number of hydrated custom elements (sp-* and others)').toBeGreaterThan(0);
       expectNone(report.errors, 'HydrationReport.errors');
       expectNone(report.deferred, 'HydrationReport.deferred (elements still carrying defer-hydration)');
       expectNone(deferredInDom, 'elements still carrying defer-hydration in the DOM');
       expectNone(logs.errors, 'console errors / uncaught exceptions during load');
       expectNone(hydrationWarnings, 'console warnings mentioning hydration');
     });
+  });
+
+  // Soft check: never fails the run, the outcome (and the diff) is recorded in the Pages table / tests/results/fidelity.
+  test(`GET / ${FIDELITY_SECTION} section fidelity (soft)`, async ({page}, testInfo) => {
+    const files = [`all-components-${FIDELITY_SECTION}.page.txt`, `all-components-${FIDELITY_SECTION}.component.txt`];
+    const metrics: Record<string, string | number> = {section: FIDELITY_SECTION};
+    let status: 'pass' | 'fail' = 'pass';
+    let note: string | undefined;
+    try {
+      if (!names.includes(FIDELITY_SECTION)) throw new Error(`catalog entry "${FIDELITY_SECTION}" not found`);
+      const selector = sectionSelector(FIDELITY_SECTION);
+      await page.goto('/', {timeout: PAGE_TEST_TIMEOUT_MS});
+      await awaitHydration(page, PAGE_HYDRATION_TIMEOUT_MS);
+      await page.locator('#app').evaluate(settleTree, {timeoutMs: PAGE_SETTLE_TIMEOUT_MS});
+      const onPage = await page.locator(selector).evaluate(serializeTree, {rawAttributeValues: true});
+
+      await page.goto(`/component/${FIDELITY_SECTION}`);
+      await awaitHydration(page);
+      await page.locator(selector).evaluate(settleTree, {timeoutMs: 5000});
+      const alone = await page.locator(selector).evaluate(serializeTree, {rawAttributeValues: true});
+
+      if (onPage === alone) {
+        for (const file of files) fs.rmSync(path.join(FIDELITY_DIR, file), {force: true});
+      } else {
+        fs.mkdirSync(FIDELITY_DIR, {recursive: true});
+        fs.writeFileSync(path.join(FIDELITY_DIR, files[0]!), `${onPage}\n`);
+        fs.writeFileSync(path.join(FIDELITY_DIR, files[1]!), `${alone}\n`);
+        const diff = unifiedDiff(onPage, alone, {
+          labelA: `${FIDELITY_SECTION} section of / (hydrated)`,
+          labelB: `/component/${FIDELITY_SECTION} (hydrated)`,
+          maxChangedLines: 30,
+        });
+        status = 'fail';
+        metrics.diffRemoved = diff.removed;
+        metrics.diffAdded = diff.added;
+        note =
+          `the ${FIDELITY_SECTION} section of / differs from /component/${FIDELITY_SECTION} ` +
+          `(-${diff.removed}/+${diff.added} lines; tests/results/fidelity/${files[0]} vs ${files[1]})`;
+        testInfo.annotations.push({type: 'soft-check', description: `${note}\n${diff.text}`});
+      }
+    } catch (error) {
+      status = 'fail';
+      note = `could not compare: ${errorMessage(error)}`;
+      testInfo.annotations.push({type: 'soft-check', description: note});
+    }
+    recordResult({component: ROW, check: 'fidelity', status, metrics, note});
   });
 
   test('GET /csr client-side rendering', async ({page}, testInfo) => {

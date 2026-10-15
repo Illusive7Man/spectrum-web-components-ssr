@@ -43,6 +43,7 @@ import {entry as menu} from './menu.ts';
 import {entry as meter} from './meter.ts';
 import {entry as numberField} from './number-field.ts';
 import {entry as overlay} from './overlay.ts';
+import {entry as overlayTrigger} from './overlay-trigger.ts';
 import {entry as picker} from './picker.ts';
 import {entry as popover} from './popover.ts';
 import {entry as progressBar} from './progress-bar.ts';
@@ -103,6 +104,7 @@ const entries: CatalogEntry[] = [
   meter,
   numberField,
   overlay,
+  overlayTrigger,
   picker,
   popover,
   progressBar,

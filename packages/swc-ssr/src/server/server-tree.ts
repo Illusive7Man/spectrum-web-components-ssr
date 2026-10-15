@@ -19,8 +19,12 @@ const isElementNode = (node: AnyNode | null | undefined): node is Element =>
 const isTextNode = (node: AnyNode | null | undefined): node is Text => !!node && node.type === 'text';
 const isDocumentNode = (node: AnyNode | null | undefined): node is Document => !!node && node.type === 'root';
 
-/** True if the HTML is a whole document (a doctype or `<html>` after leading whitespace / comments). */
-function isDocumentHtml(html: string): boolean {
+/**
+ * True if the HTML is a whole document (a doctype or `<html>` after leading whitespace / comments): such HTML is
+ * parsed with parse5's `parse()`, anything else with `parseFragment()` (shared with light-mutations.ts, which must
+ * see the same structure).
+ */
+export function isDocumentHtml(html: string): boolean {
   let index = 0;
   for (;;) {
     while (index < html.length && /\s/.test(html[index])) {
@@ -49,6 +53,11 @@ const RAW_TEXT_ELEMENTS = new Set(['script', 'style', 'xmp', 'iframe', 'noembed'
 
 const escapeText = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const escapeAttribute = (text: string) => text.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+
+export interface SerializeOptions {
+  /** Leave out `data-swc-ssr` markers. */
+  stripMarkers?: boolean;
+}
 
 export class ServerTree {
   readonly root: Document;
@@ -173,21 +182,25 @@ export class ServerTree {
     return selectAll(selector, node.children as AnyNode[]) as Element[];
   }
 
-  /** Serializes the shadow content of the element with this id, re-attaching nested declarative shadow roots. */
-  serializeShadow(id: number): string | undefined {
+  /**
+   * Serializes the shadow content of the element with this id, re-attaching nested declarative shadow roots.
+   * `stripMarkers` leaves out the `data-swc-ssr` markers (ids of this tree's pass, meaningless in another pass).
+   */
+  serializeShadow(id: number, options: SerializeOptions = {}): string | undefined {
     const shadow = this.shadowRoot(id);
-    return shadow ? this.serializeChildren(shadow) : undefined;
+    return shadow ? this.serializeChildren(shadow, options) : undefined;
   }
 
-  serializeChildren(parent: ParentNode): string {
+  serializeChildren(parent: ParentNode, options: SerializeOptions = {}): string {
     let out = '';
+    const raw = isElementNode(parent as AnyNode) && RAW_TEXT_ELEMENTS.has((parent as Element).name);
     for (const child of parent.children) {
-      out += this.serialize(child as AnyNode, isElementNode(parent as AnyNode) && RAW_TEXT_ELEMENTS.has((parent as Element).name));
+      out += this.serialize(child as AnyNode, raw, options);
     }
     return out;
   }
 
-  private serialize(node: AnyNode, raw = false): string {
+  private serialize(node: AnyNode, raw: boolean, options: SerializeOptions): string {
     if (isTextNode(node)) {
       return raw ? this.restoreStyles(node.data) : escapeText(node.data);
     }
@@ -195,13 +208,16 @@ export class ServerTree {
       return `<!--${node.data}-->`;
     }
     if (isDocumentNode(node)) {
-      return this.serializeChildren(node);
+      return this.serializeChildren(node, options);
     }
     if (!isElementNode(node)) {
       return '';
     }
     let out = `<${node.name}`;
     for (const [name, value] of Object.entries(node.attribs)) {
+      if (options.stripMarkers && name === MARKER_ATTRIBUTE) {
+        continue;
+      }
       out += value === '' ? ` ${name}` : ` ${name}="${escapeAttribute(value)}"`;
     }
     out += '>';
@@ -215,9 +231,9 @@ export class ServerTree {
       for (const [name, value] of Object.entries(attributes)) {
         template += value === '' ? ` ${name}` : ` ${name}="${escapeAttribute(value)}"`;
       }
-      out += `${template}>${this.serializeChildren(shadow)}</template>`;
+      out += `${template}>${this.serializeChildren(shadow, options)}</template>`;
     }
-    return `${out}${this.serializeChildren(node)}</${node.name}>`;
+    return `${out}${this.serializeChildren(node, options)}</${node.name}>`;
   }
 }
 

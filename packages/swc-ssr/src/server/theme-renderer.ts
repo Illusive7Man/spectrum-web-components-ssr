@@ -14,7 +14,15 @@ import {ElementRenderer} from '@lit-labs/ssr/lib/element-renderer.js';
 import type {ThunkedRenderResult} from '@lit-labs/ssr/lib/render-result.js';
 import {constructElement, isThemeClass, neutralizeTheme} from './construct.js';
 import {errorMessage, getCurrentRenderContext} from './context.js';
-import {buildElement, planElement, prepareFreshElement, sameValue, type ElementPlan} from './plan.js';
+import {
+  adapterContextOf,
+  buildElement,
+  planElement,
+  prepareFreshElement,
+  sameValue,
+  stashStaticAttributes,
+  type ElementPlan,
+} from './plan.js';
 import {setAttributeAndNotify} from './realm.js';
 import {MARKER_ATTRIBUTE} from './server-tree.js';
 import {isElementPartMarker} from './plan.js';
@@ -28,8 +36,12 @@ export class ThemeRenderer extends ElementRenderer {
   declare ssrPlan: ElementPlan | undefined;
   declare ssrKey: string | undefined;
 
-  static override matchesClass(ctor: typeof HTMLElement): boolean {
-    return isThemeClass(ctor);
+  static override matchesClass(ctor: typeof HTMLElement, tagName?: string, attributes?: Map<string, string>): boolean {
+    const matches = isThemeClass(ctor);
+    if (matches && tagName !== undefined) {
+      stashStaticAttributes(tagName, attributes);
+    }
+    return matches;
   }
 
   constructor(tagName: string) {
@@ -103,7 +115,7 @@ export class ThemeRenderer extends ElementRenderer {
     const plan = this.ssrPlan;
     if (plan && plan.context.pass !== 1 && plan.adapter?.beforeRender) {
       try {
-        plan.adapter.beforeRender(element, {id: plan.id, pass: 2, tree: plan.context.tree, report: plan.report});
+        plan.adapter.beforeRender(element, adapterContextOf(plan));
       } catch (error) {
         plan.report.errors.push(`adapter beforeRender: ${errorMessage(error)}`);
       }

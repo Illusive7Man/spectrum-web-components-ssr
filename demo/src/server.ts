@@ -25,6 +25,8 @@ const escapeHtml = (value: string): string =>
 interface ShellOptions {
   title: string;
   mode: 'ssr' | 'csr';
+  /** `<html lang>`. Must equal the language the page was server-rendered with (see `pageLanguage`). */
+  lang: string;
   /** Names of the catalog entries on the page; the client reads them from `data-components`. */
   components: string[];
   /** Server-rendered markup (SSR) or '' (CSR). */
@@ -34,10 +36,10 @@ interface ShellOptions {
 }
 
 /** `#app` has no whitespace around its content on purpose: SSR and CSR then produce the same child nodes. */
-function shell({title, mode, components, body, script}: ShellOptions): string {
+function shell({title, mode, lang, components, body, script}: ShellOptions): string {
   return (
     '<!doctype html>' +
-    '<html lang="en"><head><meta charset="utf-8">' +
+    `<html lang="${escapeHtml(lang)}"><head><meta charset="utf-8">` +
     '<meta name="viewport" content="width=device-width, initial-scale=1">' +
     `<title>${escapeHtml(title)}</title>` +
     '<link rel="icon" href="data:,">' +
@@ -46,6 +48,56 @@ function shell({title, mode, components, body, script}: ShellOptions): string {
     (script ? '<script type="module" src="/dist/client.js"></script>' : '') +
     '</body></html>'
   );
+}
+
+/* -------------------------------------------------------------------------------------------------------------- *
+ * Page language
+ * -------------------------------------------------------------------------------------------------------------- */
+
+/** A BCP 47 language tag in canonical form (`de-de` -> `de-DE`), or undefined when `value` is not one. */
+function canonicalLanguage(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length > 35 || !/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})*$/.test(value)) {
+    return undefined;
+  }
+  try {
+    return Intl.getCanonicalLocales(value)[0];
+  } catch {
+    return undefined;
+  }
+}
+
+/** The most preferred language of an `Accept-Language` header (highest q, first wins on ties; `*` ignored). */
+function preferredLanguage(header: string | undefined): string | undefined {
+  if (!header) return undefined;
+  const ranges = header
+    .split(',')
+    .map((part, index) => {
+      const [tag = '', ...params] = part.trim().split(';');
+      const q = params.map((param) => /^\s*q\s*=\s*([0-9.]+)\s*$/.exec(param)?.[1]).find((value) => value !== undefined);
+      return {tag: tag.trim(), q: q === undefined ? 1 : Number(q), index};
+    })
+    .filter((range) => range.tag !== '' && range.tag !== '*' && range.q > 0)
+    .sort((a, b) => b.q - a.q || a.index - b.index);
+  for (const range of ranges) {
+    const tag = canonicalLanguage(range.tag);
+    if (tag) return tag;
+  }
+  return undefined;
+}
+
+/** Language of pages whose request names none (no `?lang=`, no usable `Accept-Language`). */
+const DEFAULT_LANG = 'en';
+
+/**
+ * Language of a page: `?lang=<tag>` wins, else the request's most preferred `Accept-Language` language, else
+ * `DEFAULT_LANG`. SSR routes pass it to `renderSpectrum({lang})` (number formatting / labels of components with a
+ * `LanguageResolutionController`); SSR and CSR routes write it to `<html lang>`, where the client's components
+ * resolve their locale from (through `<sp-theme>`), so the hydrating render formats like the server did. The
+ * default is passed explicitly too: without a document language the server would resolve `navigator.language`
+ * ('en-US') and report a `locale: no language is set` warning on every element that formats numbers.
+ */
+function pageLanguage(req: Request): string {
+  return canonicalLanguage(req.query.lang) ?? preferredLanguage(req.get('accept-language')) ?? DEFAULT_LANG;
 }
 
 /* -------------------------------------------------------------------------------------------------------------- *
@@ -95,7 +147,12 @@ interface SsrPage {
   renderMs: number;
 }
 
-function renderSsr(entries: CatalogEntry[], reportKey: string, tolerateLoadErrors: boolean): Promise<SsrPage> {
+function renderSsr(
+  entries: CatalogEntry[],
+  reportKey: string,
+  tolerateLoadErrors: boolean,
+  lang: string,
+): Promise<SsrPage> {
   return exclusive(async () => {
     const started = performance.now();
     const loaded: CatalogEntry[] = [];
@@ -113,7 +170,7 @@ function renderSsr(entries: CatalogEntry[], reportKey: string, tolerateLoadError
     }
     // deferHydration: nothing hydrates while the client is still loading definitions; hydrateSpectrum() then
     // enables the elements in document order (the order client-side rendering updates them in).
-    const result = await renderSpectrum(pageTemplate(loaded), {deferHydration: true});
+    const result = await renderSpectrum(pageTemplate(loaded), {deferHydration: true, lang});
     const report: ServedReport = {...result.report, loadErrors};
     lastReport = report;
     reportsByKey.set(reportKey, report);
@@ -127,6 +184,37 @@ function renderSsr(entries: CatalogEntry[], reportKey: string, tolerateLoadError
 
 const app = express();
 app.disable('x-powered-by');
+
+/**
+ * Health checks: HEAD requests (any path) are answered with 200 right away and never render. Express would
+ * otherwise run the GET handler for them - a full server render of the whole catalog for every `HEAD /` that a
+ * preview / uptime monitor polls with. They are logged separately from the request log: the first one at once,
+ * then a count per minute (only for minutes that had any).
+ */
+const HEAD_LOG_INTERVAL_MS = 60_000;
+let headRequests = 0;
+let headLogged = false;
+const headLog = setInterval(() => {
+  if (headRequests > 0) {
+    console.log(`[demo] health checks: ${headRequests} HEAD request(s) in the last minute (answered 200, no render)`);
+    headRequests = 0;
+  }
+}, HEAD_LOG_INTERVAL_MS);
+headLog.unref();
+
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (req.method !== 'HEAD') {
+    next();
+    return;
+  }
+  res.status(200).set('Cache-Control', 'no-store').end();
+  if (!headLogged) {
+    headLogged = true;
+    console.log(`[demo] health check: HEAD ${req.originalUrl} -> 200 (no render; further HEAD requests are counted per minute)`);
+  } else {
+    headRequests++;
+  }
+});
 
 /** One line per request (static bundle files excluded); SSR routes add their render duration. */
 app.use((req: Request, res: Response, next: NextFunction) => {
@@ -165,12 +253,14 @@ async function serveSsr(
   title: string,
   tolerateLoadErrors: boolean,
 ): Promise<void> {
-  const page = await renderSsr(entries, reportKey, tolerateLoadErrors);
+  const lang = pageLanguage(req);
+  const page = await renderSsr(entries, reportKey, tolerateLoadErrors, lang);
   const elementErrors = page.report.elements.reduce((sum, element) => sum + element.errors.length, 0);
   const fallbacks = page.report.elements.filter((element) => element.fallback).length;
   res.locals.renderLog =
     `render ${page.renderMs.toFixed(1)} ms (renderSpectrum ${page.report.durationMs.toFixed(1)} ms), ` +
     `${page.report.elements.length} elements, ${elementErrors} errors, ${fallbacks} fallbacks` +
+    `, lang ${lang}` +
     (page.report.loadErrors.length > 0 ? `, ${page.report.loadErrors.length} entries skipped` : '');
   res.set('Server-Timing', `ssr;dur=${page.renderMs.toFixed(1)}`);
   sendHtml(
@@ -178,6 +268,7 @@ async function serveSsr(
     shell({
       title,
       mode: 'ssr',
+      lang,
       components: page.entries.map((entry) => entry.name),
       body: page.html,
       script: req.query.nohydrate !== '1',
@@ -185,8 +276,18 @@ async function serveSsr(
   );
 }
 
-function serveCsr(res: Response, entries: CatalogEntry[], title: string): void {
-  sendHtml(res, shell({title, mode: 'csr', components: entries.map((entry) => entry.name), body: '', script: true}));
+function serveCsr(req: Request, res: Response, entries: CatalogEntry[], title: string): void {
+  sendHtml(
+    res,
+    shell({
+      title,
+      mode: 'csr',
+      lang: pageLanguage(req),
+      components: entries.map((entry) => entry.name),
+      body: '',
+      script: true,
+    }),
+  );
 }
 
 // SSR of the whole catalog. An entry that fails to load is left out (and listed in /report.json) rather than
@@ -208,7 +309,7 @@ app.get(
 // Client-only reference: same shell, empty #app, the client renders the same template with lit's render().
 app.get(
   '/csr',
-  route(async (_req, res) => serveCsr(res, catalog, 'Spectrum SSR demo (CSR)')),
+  route(async (req, res) => serveCsr(req, res, catalog, 'Spectrum SSR demo (CSR)')),
 );
 
 app.get(
@@ -216,7 +317,7 @@ app.get(
   route(async (req, res) => {
     const entry = findEntry(req.params.name);
     if (!entry) return notFound(res, `component "${req.params.name}"`);
-    serveCsr(res, [entry], `Spectrum SSR demo (CSR) - ${entry.name}`);
+    serveCsr(req, res, [entry], `Spectrum SSR demo (CSR) - ${entry.name}`);
   }),
 );
 

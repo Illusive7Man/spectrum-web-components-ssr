@@ -19,7 +19,7 @@
 import {collectSlotchangeBindings, findBoundSlot} from '../shared/slot-bindings.js';
 import {LitElement, ReactiveElement, type PropertyValues} from 'lit';
 import {_$LE} from 'lit-element/private-ssr-support.js';
-import {runInContext, errorMessage, type RenderContext} from './context.js';
+import {runInContext, errorMessage, withElementScope, type RenderContext, type RenderSession} from './context.js';
 import type {ElementReport} from './types.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -103,7 +103,118 @@ function installPatches(): void {
     }
     return getUpdateComplete.call(this);
   };
+
+  installAttributeReactions(reactiveProto);
 }
+
+/* ------------------------------------------------------------------------------------------------------------ *
+ * Attribute reactions
+ * ------------------------------------------------------------------------------------------------------------ */
+
+/** Depth of renderer-driven attribute writes, which call `attributeChangedCallback` themselves. */
+let reactionsSuppressed = 0;
+
+/**
+ * Runs `fn` without attribute reactions: for the renderer's own attribute writes (upstream
+ * `ElementRenderer.setAttribute` and swc-ssr's replays call `attributeChangedCallback` explicitly).
+ */
+export function withoutAttributeReactions<T>(fn: () => T): T {
+  const resume = suspendAttributeReactions();
+  try {
+    return fn();
+  } finally {
+    resume();
+  }
+}
+
+/** `withoutAttributeReactions` for code that cannot run in a callback (a `super()` call); returns the resume function. */
+export function suspendAttributeReactions(): () => void {
+  reactionsSuppressed++;
+  let resumed = false;
+  return () => {
+    if (!resumed) {
+      resumed = true;
+      reactionsSuppressed--;
+    }
+  };
+}
+
+/** Observed attributes per class (Lit's `observedAttributes` getter builds a new array on every read). */
+const observedByClass = new WeakMap<object, ReadonlySet<string>>();
+
+function observedAttributesOf(element: any): ReadonlySet<string> {
+  const ctor = element.constructor;
+  let observed = observedByClass.get(ctor);
+  if (!observed) {
+    let list: unknown;
+    try {
+      list = ctor?.observedAttributes;
+    } catch {
+      list = undefined;
+    }
+    observed = new Set(Array.isArray(list) ? list.map((name) => String(name).toLowerCase()) : []);
+    observedByClass.set(ctor, observed);
+  }
+  return observed;
+}
+
+/**
+ * Browsers run a custom element's `attributeChangedCallback` for every change of an observed attribute
+ * (`setAttribute` / `removeAttribute` / `toggleAttribute`), whoever makes it - also the component's own code. The
+ * `@lit-labs/ssr-dom-shim` `Element` only stores the attribute, so a component that sets an observed attribute on
+ * itself never saw its property follow on the server. Example: `field-label/src/FieldLabel.js` `willUpdate()` sets
+ * its generated `id` attribute and relies on the `id` property (`@property() id`) following it; on the server the
+ * property stayed '' and `applyTargetLabel()` appended an empty id to the target's `aria-labelledby` (`"label "`,
+ * which became `"label  sp-field-label-N"` after hydration: the slider section of the full-catalog page).
+ *
+ * The reaction runs for elements swc-ssr connected (their component code runs) and not for the renderer's own
+ * writes (`withoutAttributeReactions`), which notify explicitly. Lit's own reflection (`__propertyToAttribute`)
+ * is ignored by Lit's `attributeChangedCallback` (`__reflectingProperty`), as in browsers. Errors of the callback
+ * are reported on the element, never thrown into the code that changed the attribute (browsers report them too).
+ */
+function installAttributeReactions(reactiveProto: any): void {
+  const base = Object.getPrototypeOf(reactiveProto);
+  const react = (element: any, name: string, old: string | null): void => {
+    const value: string | null = element.getAttribute(name);
+    const key = name.toLowerCase();
+    if (old === value || !observedAttributesOf(element).has(key) || typeof element.attributeChangedCallback !== 'function') {
+      return;
+    }
+    try {
+      element.attributeChangedCallback(key, old, value);
+    } catch (error) {
+      const report = reactionReports.get(element);
+      if (report) {
+        record(report, `attributeChangedCallback(${name})`, error);
+      }
+    }
+  };
+  const active = (element: any): boolean => reactionsSuppressed === 0 && !!element[SSR_CONNECTED];
+  // (The shim's `toggleAttribute` calls `setAttribute` / `removeAttribute`, so it reacts through them.)
+  for (const method of ['setAttribute', 'removeAttribute'] as const) {
+    const original = base?.[method];
+    if (typeof original !== 'function' || Object.prototype.hasOwnProperty.call(reactiveProto, method)) {
+      continue;
+    }
+    Object.defineProperty(reactiveProto, method, {
+      value: function (this: any, name: string, ...rest: unknown[]) {
+        if (!active(this)) {
+          return original.call(this, name, ...rest);
+        }
+        const key = String(name);
+        const old: string | null = this.getAttribute(key);
+        const result = original.call(this, name, ...rest);
+        react(this, key, old);
+        return result;
+      },
+      configurable: true,
+      writable: true,
+    });
+  }
+}
+
+/** Reports of connected elements (errors of attribute reactions go there). */
+const reactionReports = new WeakMap<object, ElementReport>();
 
 installPatches();
 
@@ -123,6 +234,27 @@ function setFlag(element: object, flag: symbol): void {
 export function markManaged(element: object, report: ElementReport): void {
   setFlag(element, SSR_MANAGED);
   Object.defineProperty(element, SSR_REPORT, {value: report, configurable: true, enumerable: false, writable: true});
+}
+
+/**
+ * Undoes `markManaged` for an element whose effective lifecycle turned out lower than `full` once its
+ * `LitElementRenderer.renderOptions` were known (they are evaluated after its attributes are set, see
+ * render-options.ts). Must happen before the element's first update.
+ */
+export function unmarkManaged(element: any): void {
+  if (element?.[SSR_MANAGED]) {
+    element[SSR_MANAGED] = false;
+  }
+}
+
+/** Whether the element's lifecycle is driven by swc-ssr (`full` mode). */
+export function isManaged(element: any): boolean {
+  return !!element?.[SSR_MANAGED];
+}
+
+/** The reactive controllers of an element (tracked by the `addController` patch above). */
+export function controllersOf(element: object): readonly unknown[] {
+  return [...(controllersByHost.get(element) ?? [])];
 }
 
 /**
@@ -225,18 +357,21 @@ function catchAsync(result: unknown, report: ElementReport | undefined, step: st
 
 /**
  * Calls the element's `connectedCallback` once. Lit's `enableUpdating` is replaced by a no-op first (as
- * `LitElementRenderer` does) so no asynchronous update cycle is ever started on the server.
+ * `LitElementRenderer` does) so no asynchronous update cycle is ever started on the server. Elements connected for
+ * a render (`session`) are disconnected when it ends (`disconnectAll`).
  */
-export function connectElement(element: any, report: ElementReport): void {
+export function connectElement(element: any, report: ElementReport, session?: RenderSession): void {
   if (element[SSR_CONNECTED]) {
     return;
   }
   setFlag(element, SSR_CONNECTED);
+  reactionReports.set(element, report);
+  session?.connected.push({element, report});
   if (isReactiveElement(element)) {
     element.enableUpdating = () => {};
   }
   try {
-    element.connectedCallback?.();
+    withElementScope(report, () => element.connectedCallback?.());
   } catch (error) {
     record(report, 'connectedCallback', error);
   }
@@ -246,11 +381,45 @@ export function isConnectedBySsr(element: any): boolean {
   return !!element?.[SSR_CONNECTED];
 }
 
+/**
+ * Calls `disconnectedCallback` on every element the render connected (all passes, connection order), as a browser
+ * does when the rendered tree is removed. Errors become warnings of the element's report.
+ *
+ * Retention path (fixed): `connectedCallback` (and controllers' `hostConnected`) register instances in
+ * module-level singletons that only `disconnectedCallback` / `hostDisconnected` undo, e.g.
+ * `reactive-controllers/src/LanguageResolution.js` -> `AttributeObserver.js` (a module-level Map of listeners on
+ * `document.documentElement`: one bound listener per connected component with a LanguageResolutionController -
+ * slider, number field, ...), `iconset/src/Iconset.js` -> `IconsetRegistry`, listeners added to `document`.
+ * Without the disconnect every render's elements (pass 1, which is discarded, and the final pass) stayed reachable
+ * from those singletons, and through each element's structure backing the whole render (realm, server tree,
+ * contexts): about 226 MB per full-catalog render.
+ */
+export function disconnectAll(session: RenderSession): void {
+  for (const {element, report} of session.connected.splice(0)) {
+    if (!element || !(element as any)[SSR_CONNECTED]) {
+      continue;
+    }
+    (element as any)[SSR_CONNECTED] = false;
+    try {
+      const result = withElementScope(report, () => (element as any).disconnectedCallback?.());
+      if (result && typeof result.then === 'function') {
+        result.then(undefined, () => {});
+      }
+    } catch (error) {
+      report.warnings.push(`disconnectedCallback: ${errorMessage(error)}`);
+    }
+  }
+}
+
 /** Upstream semantics (`none` / `connected` modes): `willUpdate` + attribute reflection. */
 export function runBaseUpdate(element: any, report: ElementReport): void {
   if (!isReactiveElement(element)) {
     return;
   }
+  withElementScope(report, () => baseUpdate(element, report));
+}
+
+function baseUpdate(element: any, report: ElementReport): void {
   const changed = changedProperties(element as LitElement);
   try {
     (element as any).willUpdate(changed);
@@ -296,11 +465,18 @@ function initializeWrappedProperties(element: any, changed: PropertyValues, repo
   }
 }
 
-/** One synchronous update cycle (`full` mode). */
+/**
+ * One synchronous update cycle (`full` mode). Runs in the element's render scope: promises its hooks create carry
+ * its report (unhandled rejections are attributed to it, see context.ts).
+ */
 export function runFullUpdate(element: any, report: ElementReport): void {
   if (!isReactiveElement(element)) {
     return;
   }
+  withElementScope(report, () => fullUpdate(element, report));
+}
+
+function fullUpdate(element: any, report: ElementReport): void {
   initializeWrappedProperties(element, changedProperties(element as LitElement), report);
   const changed = changedProperties(element as LitElement);
   const controllers = [...(controllersByHost.get(element) ?? [])];
@@ -408,9 +584,11 @@ export function flushFrame(context: RenderContext): void {
 /** Drains microtasks and flushes queued animation frames until nothing is left (bounded). */
 export async function settle(context: RenderContext): Promise<void> {
   await drainMicrotasks();
+  context.session.checkAborted();
   for (let frame = 0; frame < MAX_FRAMES_PER_SETTLE && context.session.raf.size > 0; frame++) {
     runInContext(context, () => flushFrame(context));
     await drainMicrotasks();
+    context.session.checkAborted();
   }
 }
 
@@ -429,6 +607,7 @@ export async function runDocumentLifecycle(
 ): Promise<void> {
   const managed = elements.filter(({element}) => element?.[SSR_MANAGED] && isReactiveElement(element));
   for (let round = 0; round < MAX_DOCUMENT_ROUNDS; round++) {
+    context.session.checkAborted();
     const due = managed.filter(({element}) => !element.hasUpdated || hasPendingUpdate(element));
     if (due.length === 0 && context.session.raf.size === 0) {
       break;

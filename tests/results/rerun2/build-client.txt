@@ -1,0 +1,9 @@
+
+> spectrum-ssr-workspace@0.0.0 build:client
+> node demo/build.mjs
+
+
+  demo\public\dist\client.js      2.5mb
+  demo\public\dist\client.js.map  4.3mb
+
+Done in 218ms

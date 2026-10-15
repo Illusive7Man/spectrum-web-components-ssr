@@ -7,6 +7,12 @@
 export interface SerializeOptions {
   /** Extra attribute names (lowercase) to leave out, e.g. generated ids. */
   ignoreAttributes?: string[];
+  /**
+   * Keep attribute values verbatim instead of collapsing / trimming their whitespace (generated ids are still
+   * canonicalized token by token, `style` is still compared by declarations). Used by the stricter section
+   * comparison of tests/all-components.spec.ts, where e.g. a trailing space in `aria-labelledby` must show.
+   */
+  rawAttributeValues?: boolean;
 }
 
 /**
@@ -102,7 +108,7 @@ export function serializeTree(root: Element, opts?: SerializeOptions): string {
       .filter((attr) => !(control && (attr.name === 'value' || attr.name === 'checked')))
       .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
       .map((attr) => {
-        let value = collapse(attr.value);
+        let value = opts?.rawAttributeValues ? attr.value : collapse(attr.value);
         if (attr.name === 'style') {
           // The declarations, not their formatting: a style the client updated through the CSSOM is re-serialized
           // by the browser ("width: 39.2157%;"), one written as attribute text keeps the template's formatting.

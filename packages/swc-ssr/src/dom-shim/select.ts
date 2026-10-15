@@ -131,9 +131,14 @@ function options(context?: AnyNode): Options<AnyNode, AnyNode> {
 export type SelectorErrorHandler = (selector: string, error: unknown) => void;
 let selectorErrorHandler: SelectorErrorHandler | undefined;
 
-/** Unsupported selectors return "no match" instead of throwing; the server renderer can log them. */
-export function setSelectorErrorHandler(handler: SelectorErrorHandler | undefined): void {
+/**
+ * Unsupported selectors return "no match" instead of throwing; the server renderer can log them. Returns the
+ * handler that was set before (so callers can restore it).
+ */
+export function setSelectorErrorHandler(handler: SelectorErrorHandler | undefined): SelectorErrorHandler | undefined {
+  const previous = selectorErrorHandler;
   selectorErrorHandler = handler;
+  return previous;
 }
 
 function reportSelectorError(selector: string, error: unknown): void {

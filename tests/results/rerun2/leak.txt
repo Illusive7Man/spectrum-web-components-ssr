@@ -1,0 +1,8 @@
+render 1: 2369 ms, 19570097 chars, 1349 elements | heapUsed 110 MB, rss 436 MB
+render 2: 2309 ms, 19570136 chars, 1349 elements | heapUsed 110 MB, rss 442 MB
+render 3: 2296 ms, 19570136 chars, 1349 elements | heapUsed 110 MB, rss 444 MB
+render 4: 2358 ms, 19570136 chars, 1349 elements | heapUsed 110 MB, rss 406 MB
+render 5: 2382 ms, 19570136 chars, 1349 elements | heapUsed 110 MB, rss 405 MB
+render 6: 2290 ms, 19570136 chars, 1349 elements | heapUsed 110 MB, rss 407 MB
+render 7: 2997 ms, 19570136 chars, 1349 elements | heapUsed 111 MB, rss 408 MB
+render 8: 2328 ms, 19570136 chars, 1349 elements | heapUsed 111 MB, rss 411 MB

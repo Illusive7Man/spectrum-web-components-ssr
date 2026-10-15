@@ -2,8 +2,11 @@
  * Adapter registry. Spectrum-specific behaviour lives ONLY in adapters (one file per tag or family in this
  * folder); the generic renderer looks adapters up by tag. The last registered adapter matching a tag wins, so
  * applications can override the built-in ones with `registerAdapter()`.
+ *
+ * Inspectors (internal) look at every element of the final pass once its lifecycle is complete and add report
+ * messages about things the server cannot reproduce faithfully (e.g. `language.ts`). They never change elements.
  */
-import type {ElementAdapter} from '../types.js';
+import type {ElementAdapter, ElementReport, RenderSpectrumOptions} from '../types.js';
 
 const adapters: ElementAdapter[] = [];
 const cache = new Map<string, ElementAdapter | null>();
@@ -30,4 +33,23 @@ export function findAdapter(tag: string): ElementAdapter | undefined {
   }
   cache.set(tag, found ?? null);
   return found;
+}
+
+export interface InspectorContext {
+  report: ElementReport;
+  options: RenderSpectrumOptions;
+  /** The reactive controllers of the element (empty for non-Lit elements). */
+  controllers: readonly unknown[];
+}
+
+export type ElementInspector = (element: HTMLElement, context: InspectorContext) => void;
+
+const inspectorList: ElementInspector[] = [];
+
+export function registerInspector(inspector: ElementInspector): void {
+  inspectorList.push(inspector);
+}
+
+export function inspectors(): readonly ElementInspector[] {
+  return inspectorList;
 }

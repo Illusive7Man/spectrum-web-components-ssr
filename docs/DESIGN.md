@@ -107,7 +107,8 @@ Hard constraint: **no edits to any `@spectrum-web-components/*` source**. Everyt
    (`setAttribute`/`setProperty`/`connectedCallback` are idempotent: second application is skipped or harmless).
    `renderRoot`/`shadowRoot` get a facade over the pass-1 shadow content so `@query` decorators resolve to real instances
    (e.g. `sp-picker`'s `sp-menu` inside its shadow). Slots get `assignedNodes()/assignedElements()` from the tree.
-4. **Server lifecycle extension (pass 2 only, opt-in per element, default on, with per-tag overrides)** - after the standard
+4. **Server lifecycle extension (pass 2 only, default on for managed classes - Spectrum's, see `isManagedClass` - with
+   per-tag overrides; other Lit elements keep upstream semantics)** - after the standard
    `willUpdate`+reflection and before `render()`: run `firstUpdated(changed)` and `updated(changed)` in try/catch, flush a
    synchronous microtask/rAF queue (`requestAnimationFrame` callbacks are queued and flushed by the renderer, `updateComplete`
    resolves immediately), and if the element requested another update (`isUpdatePending` / changed properties non-empty),
@@ -157,6 +158,8 @@ Lit into browser mode - check `lit`'s `node` export conditions).
 * `demo/src/server.ts` - express: `GET /` SSR of all; `GET /component/:name` SSR of one; `GET /csr` and
   `GET /csr/:name` client-only versions (same template, no SSR, used as the reference DOM); `?nohydrate=1` serves SSR
   without the client bundle (pure SSR view); `GET /report.json` last render report. Serves `demo/public` (client bundle).
+  The page language (`?lang=`, else `Accept-Language`, else `en`) goes to `renderSpectrum({lang})` and `<html lang>`;
+  `HEAD` on any path answers 200 without rendering (health checks).
 * `demo/build.mjs` - esbuild bundle of `demo/src/client.ts` -> `demo/public/dist/client.js` (ESM, sourcemap).
 * `demo/src/client.ts` - imports `swc-ssr/client` first, loads the catalog, hydrates with the same template + data as the server.
 
@@ -173,6 +176,15 @@ hydration. The runner writes `tests/results/summary.md` (a table: component -> S
 so that every run shows the current support matrix. `tests/all-components.spec.ts` checks the whole-catalog page `GET /`
 (SSR markup with every section, render report, hydration without errors / deferred elements / console errors) and
 `GET /csr`; it is reported as the `all-components` row of a separate "Pages" table (not counted as a component).
+Its soft check "GET / slider section fidelity" compares attribute values verbatim (`rawAttributeValues`) between the
+slider section of `/` (a page that needs a third pass) and `/component/slider`; it never fails the run and shows in
+the Pages table's Fidelity column. More rows of the Pages table: `tests/agnostic.spec.ts` (`agnostic: overlay-trigger`,
+`?agnostic=1`: nothing stays deferred, every candidate hydrates, a click opens the trigger) and
+`tests/locale.spec.ts` (`locale: number-field`, `?lang=de` and `Accept-Language`: German formatting in the server
+markup, hydration, fidelity against the client-rendered page in the same language). `tests/mobile.spec.ts` (390x844,
+`isMobile`, `hasTouch`, `deviceScaleFactor` 3) checks picker / action-menu / contextual-help on phones (no hydration
+errors or mismatch recoveries, mobile state after hydration, flicker, a tap opens an `sp-tray`) and writes the
+"Mobile" table. These specs follow `SWC_SSR_COMPONENTS` / `SWC_SSR_SMOKE`.
 
 Fidelity normalization (`tests/helpers/dom.ts`): generated ids in id / id-reference attributes (Spectrum's `randomID()`
 suffixes and instance counters) are compared by reference structure (`<prefix>#n` in order of first appearance), and
@@ -215,9 +227,30 @@ Server (`swc-ssr/server`, all outside Spectrum sources):
   (so `overlay/src/Overlay.js` picks the same strategy and renders the same `popover` attribute as in browsers).
 * Adapters for layout-dependent state (`sp-breadcrumbs`, `sp-split-view`, `sp-color-wheel`): computed from design tokens /
   "enough room" instead of zero sizes.
+* Render end: elements are disconnected (`disconnectedCallback` on everything swc-ssr connected, every pass), pass
+  contexts disposed, one event-loop turn before the result (see "Hardening" below).
+* Light mutations are located by the element-child path in their tree scope and must match the recorded element's
+  signature (tag + `id`/`name`/`slot`/`type`/`role`/`part`/`for`/`href`/`src` + `class`); otherwise the change moves to
+  the single exact match in the scope, or is skipped with a warning. Whole documents are parsed with parse5 `parse()`
+  (`isDocumentHtml` is shared with `ServerTree`).
+* The previous pass's shadow used as fallback output has its `data-swc-ssr` markers stripped
+  (`ServerTree.serializeShadow(id, {stripMarkers: true})`).
+* Lazy definitions: undefined tags are tracked per render session; pass 1 is repeated when such a tag got defined
+  while the pass was running too. The wait is configurable (`lazyDefinitionWaitMs`) and only happens for tags this
+  render rendered while undefined (still once per tag per process).
+* Attribute reactions: connected elements get `attributeChangedCallback` for observed attributes their own code
+  changes (`setAttribute` / `removeAttribute`, and `toggleAttribute` through them), as in browsers; the shim's
+  `Element` only stores the attribute. Without it `field-label/src/FieldLabel.js` (sets its generated `id` attribute in
+  `willUpdate()`, relies on the `id` property following) appended an empty id to `aria-labelledby` (`"label "` on
+  `sp-slider` inputs of pages that need a third pass), and `action-group/src/ActionGroup.js` setting `role="radio"` on its
+  buttons left `ActionButton`'s `role` property at `button` (an extra `aria-pressed` in the server markup). The
+  renderer's own writes are excluded (`withoutAttributeReactions` in `lifecycle.ts`): upstream's
+  `ElementRenderer.setAttribute` notifies explicitly.
 
 Client (`swc-ssr/client`, `hooks.ts`): the first client render must match the server markup, which shows the settled
-state. Hydration adapters restore server state before the hydrating update (`sp-picker` selected item,
+state. The hooks apply to elements whose pre-existing shadow root was rendered by `@lit-labs/ssr` (contains a
+`<!--lit-part` marker) or whose tag starts with `sp-`; other Lit elements with a declarative shadow root are left to
+lit's own hydrate support. Hydration adapters restore server state before the hydrating update (`sp-picker` selected item,
 `sp-breadcrumbs` overflow state) or hide server-rendered shadow content from code that runs before the first render
 (`sp-slider` handle cache); the initial `slotchange` is emulated before hydrating when it changes what the element
 renders, otherwise after the hydrating update (CSR timing); a remaining mismatch re-renders that element on the client
@@ -225,13 +258,113 @@ and is reported. Server output is rendered with `deferHydration: true` and the l
 document order, so first updates run in CSR order regardless of the order definitions load in.
 
 Known differences that remain (see `tests/results/summary.md`): light-DOM insertions made by components on the server
-(e.g. `sp-table` checkbox cells) are not rendered; state that depends on timing in client-side rendering (which item of a
+(e.g. `sp-table` checkbox cells) are not rendered (reported as `dropped DOM change` warnings); state that depends on timing in client-side rendering (which item of a
 menu starts with `tabindex="0"` in `sp-picker` / `sp-action-menu` in `sp-breadcrumbs`) can settle differently, and an
 element's first client update sees the server's final attributes (`sp-swatch` sets `focusable` on the selected swatch).
 Layout-dependent values are approximated without layout (`sp-tabs` selection indicator, `sp-color-area` handle) and
 corrected after hydration.
 
+## Hardening (Oct 2026, after the review)
+
+Three streams fixed the review findings; this records what changed and why.
+
+### Memory (the 226 MB-per-render leak)
+
+Full catalog x8 (`.probe/leak.ts`, GC after each render): heapUsed went from 333 -> 1919 MB (about 226 MB kept per
+render, render time growing 3.3 -> 4.3 s) to a flat 110-112 MB with 2.3-2.9 s renders (no trend). Retention paths, each fixed
+where it starts (comments name the path):
+
+1. Elements were never disconnected: `LanguageResolutionController` registers a listener in a module-level Map
+   (`reactive-controllers/src/AttributeObserver.js`) that held the element, its structure backing, the realm and the
+   whole render; same for `IconsetRegistry` and `document` listeners. `connectElement()` records every element
+   swc-ssr connects (all passes) in the session; `disconnectAll()` runs their `disconnectedCallback` at the end of
+   every render, also a failed one.
+2. `dom-shim/install.ts` listener this-binding: the wrapper table is `WeakMap<callback, WeakMap<target, wrapper>>`
+   (weak on both sides), so `document` no longer keeps every callback ever added.
+3. Session hooks (`context.ts`) are an ordered set of active sessions; ending one re-points the hooks at the most
+   recent session still active (or what was there before any session). A finished session is marked `ended` and
+   nothing is queued into it (it used to collect rAF callbacks and document listeners without bound when an outer
+   render finished before a nested one).
+4. V8 keeps accessor functions in the shared hidden class, so per-instance accessor closures pinned the first
+   instance's render forever. `realm.ts` (event links `__host` / `__eventTargetParent`) and `adapters/overlay.ts`
+   (`keepClosed` `open`) use shared accessor functions plus a `WeakMap`.
+5. Back-to-back queued renders ran in one microtask chain, so zero-delay timers and Node's pending-rejection
+   processing never ran between them. A render now waits one event-loop turn (`setTimeout 0`) after disconnecting,
+   with its session still active, before building the report; late rejections that arrive then become `#render` /
+   element warnings.
+6. `RenderContext.dispose()` clears realm, previous, tree, pool, records, reports and stacks after the report is
+   built. `TreeRealm.dispose()` stops creating instances but keeps structure backings (late component continuations,
+   e.g. `sp-slider`'s `getUpdateComplete` reading its `@query` number field, still need them).
+
+`packages/swc-ssr/test/memory.test.ts` guards this (heap growth between renders 4 and 12 of a mid-size page, render
+contexts collected, removed listeners collected, out-of-order session ends). Note: in some runs the very first render
+of a process still measures about 317 MB when GC runs right after its promise resolved (no event-loop turn in
+between); it is freed at the next turn (`YIELD=50` in the probe: flat 110 MB from render 1), later renders never show
+it, and a server yields between requests anyway.
+
+### Server (review H1, M1-M7, L1-L5)
+
+* H1: `LitElementRenderer.renderOptions` apply to every element, pre-built or not, evaluated after attributes and
+  properties are set, as upstream does (`render-options.ts`). `disableSsr`: not pooled / connected / updated, no
+  shadow root, light DOM still rendered.
+* M1: `'full'` is the default only for managed classes (`isManagedClass`, default `adapters/spectrum-class.ts`: the
+  `SpectrumMixin` prototype; on the catalog every Lit element except `sp-theme` and `sp-tooltip-openable`). Other Lit
+  elements keep upstream behaviour unless `lifecycleByTag` / `isManagedClass` opt them in.
+* M2: rejections are attributed through an `AsyncLocalStorage` scope per render (and per element around its hooks):
+  only rejections of promises the render created go into its report, to the element whose hook created them,
+  otherwise to `#render`. Late ones after the render are only logged in debug mode; everything else gets Node's
+  behaviour for the `--unhandled-rejections` mode (or the application's own listener decides).
+* M3: pool key = scope + tag + hash of static attributes + ordinal; adoption refused when static attributes differ;
+  stale upstream attributes are removed (with `attributeChangedCallback`) before the lifecycle.
+* M4 / M5: light mutations matched by signature (see Integration findings); whole documents parsed with `parse()`.
+* M6: `timeoutMs` deadline (the queue never deadlocks), nested renders from async work of a running render run inline,
+  `lazyDefinitionWaitMs`.
+* M7: `lang` option (sets `document.documentElement.lang` for the render) and a language inspector warning about
+  elements whose locale falls back to `navigator.language`. The demo always passes the page language.
+* L1: fallback shadow markup without previous-pass markers. L2: `full` elements updated after their markup was
+  emitted are reported and trigger one more pass (still at most 3). L3: adapters get the real pass, key and
+  `previousId`. L4: pre-instantiation uses a Set. L5: structure changes on rendered nodes are reported (`dropped DOM
+  change`), via `setDroppedMutationHandler` in `dom-shim/hooks.ts` and three call sites in `install.ts`.
+
+### Client and DOM shim (review H2, M8, M9, L6-L8)
+
+* H2: one predicate for hydration candidates (`client/elements.ts`): `defer-hydration`, or a valid custom element
+  name that is `sp-*`, has a shadow root, or is already defined. Non-prefixed Spectrum elements (`<overlay-trigger>`)
+  hydrate on the agnostic path; framework component hosts (`<app-root>`) are not awaited. Covered by
+  `tests/agnostic.spec.ts`.
+* M8: `crypto.getRandomValues` returns deterministic bytes only for `randomID()`-shaped requests (plain
+  `Uint8Array(4)`) during the synchronous parts of a render; everything else uses the CSPRNG.
+  `configureRandomSource({deterministicIds})` (process-wide) and `RenderSpectrumOptions.deterministicIds` (per render).
+* M9: `MatchMediaController` adapter for `sp-picker`, `sp-action-menu`, `sp-contextual-help` (pins `matches` to the
+  server value during hydration, restores it afterwards). The server still cannot render the mobile state (no
+  client hints); phones hydrate the desktop markup without a mismatch and then re-render. Covered by
+  `tests/mobile.spec.ts` (390x844, touch, including the deprecated `<sp-picker><sp-menu>` variant that renders its
+  closed overlay at once).
+* L6: hooks only for `@lit-labs/ssr` shadow roots or `sp-*`; the initial-slotchange plan runs after
+  `willUpdate()`/`hostUpdate()` (adapters can opt into `slotchangePlan: 'before-willupdate'`).
+* L8: runtime dependencies declared in `packages/swc-ssr/package.json`.
+
+### Process-wide state
+
+* The DOM shim's globals are **process-wide and permanent** (review L7, not feasible to scope): `window` (=
+  `globalThis`), `navigator`, `matchMedia`, `requestAnimationFrame` & co., `getComputedStyle`, `CSS`, no-op global
+  event methods, `innerWidth`, `screen`, `scrollTo`, element / event classes. Measured with `.probe/window-scope.ts`
+  (full catalog, 2 renders): 128 `window` reads while the registration modules are imported (no detectable end of an
+  application's import phase), 6344 inside the synchronous parts of renders, 12 outside them (`TopNav.manageItems`
+  via the initial slotchange); lazily imported modules (`sp-number-field`, `sp-color-handle`, `sp-color-loupe`,
+  chevron icons) evaluate asynchronously and would throw in `defineElement` and stay failed. Libraries that sniff
+  `typeof window` take their browser branch once the shim is installed: import them first or isolate them in a
+  worker.
+* The `unhandledRejection` listener (see M2) is installed with the first render and kept.
+* `document.documentElement.lang` is set per render (`lang`) and restored.
+* Module-level instance counters in Spectrum ids (`sp-dialog-label-N`) make the output of the first and later renders
+  of one process differ slightly; fidelity tests normalize them.
+
 ## Coding conventions
+
+Never define per-instance accessors (`get` / `set`) whose functions are closures over render state: V8 keeps accessor
+functions in shared hidden classes, so they outlive the instance and pin the render. Use shared accessor functions
+plus a `WeakMap` (as `realm.ts` event links and `adapters/overlay.ts` `keepClosed` do).
 
 TypeScript strict, ESM, Node >= 20. No build step for the server (run with `tsx`); client via esbuild. Keep every Spectrum-specific
 behaviour in `packages/swc-ssr/src/server/adapters/*.ts` (one file per tag or family) registered in a map, so the generic

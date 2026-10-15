@@ -9,6 +9,9 @@
 import '@lit-labs/ssr/lib/install-global-dom-shim.js';
 import {extrasInstalled, installExtras} from './install.js';
 
+export {configureRandomSource, isRandomIdRequest} from './install.js';
+export type {RandomSourceOptions} from './install.js';
+
 export function installSpectrumDomShim(): void {
   installExtras();
 }

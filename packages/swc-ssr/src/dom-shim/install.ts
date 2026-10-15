@@ -33,6 +33,9 @@ import {
   cloneNode,
   createElementForTag,
   datasetOf,
+  dropInnerHTML,
+  dropReplaceChildren,
+  dropTextContent,
   emptyRect,
   insertBefore,
   isMutable,
@@ -122,6 +125,8 @@ function siblingOf(node: AnyNode, offset: 1 | -1, elementsOnly: boolean): AnyNod
 
 function setTextContent(node: AnyNode, value: unknown): void {
   if (!isMutable(node)) {
+    // swc-ssr server (review L5): a tree-backed node cannot change; the drop is reported to the render (nodes.ts).
+    dropTextContent(node, value);
     return;
   }
   for (const child of [...childList(node)]) {
@@ -136,6 +141,8 @@ function setTextContent(node: AnyNode, value: unknown): void {
 function setInnerHTML(node: AnyNode, html: unknown): void {
   const target = node.localName === 'template' && node.content ? node.content : node;
   if (!isMutable(target)) {
+    // swc-ssr server (review L5): a tree-backed node cannot change; the drop is reported to the render (nodes.ts).
+    dropInnerHTML(target, html);
     return;
   }
   for (const child of [...childList(target)]) {
@@ -207,6 +214,14 @@ const cssEscape = (value: string): string =>
     control ? `\\${match.charCodeAt(0).toString(16)} ` : `\\${match}`
   );
 
+/**
+ * The server's `matchMedia()`: no media query ever matches (there is no viewport, pointer or color scheme on the
+ * server). Components render their "no query matches" state, e.g. `sp-picker` / `sp-action-menu` /
+ * `sp-contextual-help` (`reactive-controllers/src/MatchMedia.js`, `IS_MOBILE`) their desktop state. The client
+ * hydration adapters of those components (swc-ssr/client `hooks.ts`, `match-media.ts`) pin their controllers to this
+ * value (`SERVER_MEDIA_MATCHES = false`) for the hydrating update, so a phone hydrates the desktop markup and then
+ * re-renders in its mobile state. Keep the two in sync if this ever becomes configurable.
+ */
 function mediaQueryList(media: string) {
   return {
     matches: false,
@@ -497,6 +512,8 @@ function installParentNodeExtras(proto: object): void {
   }));
   defineIfAbsent(proto, 'replaceChildren', method(function (this: AnyNode, ...nodes: unknown[]) {
     if (!isMutable(this)) {
+      // swc-ssr server (review L5): a tree-backed node cannot change; the drop is reported to the render (nodes.ts).
+      dropReplaceChildren(this, nodes);
       return;
     }
     for (const child of [...childList(this)]) {
@@ -886,6 +903,61 @@ function installDocumentExtras(g: any): void {
   }
 }
 
+/* ------------------------------------------------------------------------------------------------------------ *
+ * crypto.getRandomValues: deterministic ids during renders, the real CSPRNG for everything else
+ * ------------------------------------------------------------------------------------------------------------ */
+
+/** Process-wide configuration of the `crypto.getRandomValues` wrapper (see `configureRandomSource`). */
+export interface RandomSourceOptions {
+  /**
+   * Default `true`: while a render's deterministic source is active (the server renderer sets one per render pass,
+   * only around the synchronous parts of a render, `server/context.ts` `runInContext`), requests shaped like
+   * Spectrum's `randomID()` get bytes from it, so generated ids are the same in every pass of a render (and in every
+   * render of the same page). `false`: every request goes to the real CSPRNG, also during renders.
+   */
+  deterministicIds?: boolean;
+}
+
+const randomSourceOptions: Required<RandomSourceOptions> = {deterministicIds: true};
+
+/**
+ * Configures the shim's `crypto.getRandomValues` wrapper for the whole process; returns the previous settings.
+ * A per-render switch belongs in the renderer (`RenderSpectrumOptions.deterministicIds`: it simply does not activate
+ * the deterministic source for that render); this is the process-wide default / kill switch.
+ */
+export function configureRandomSource(options: RandomSourceOptions): Required<RandomSourceOptions> {
+  const previous = {...randomSourceOptions};
+  if (options.deterministicIds !== undefined) {
+    randomSourceOptions.deterministicIds = options.deterministicIds;
+  }
+  return previous;
+}
+
+/** Number of random bytes Spectrum's `randomID()` asks for (`shared/src/random-id.js`). */
+const RANDOM_ID_BYTES = 4;
+
+/**
+ * True for the request `@spectrum-web-components/shared/src/random-id.js` makes (1.12.x, the only
+ * `getRandomValues` caller in Spectrum): `crypto.getRandomValues(new Uint8Array(4))` - a plain `Uint8Array` (not a
+ * subclass such as `Buffer`) of exactly 4 bytes, used for DOM ids (`${prefix}-${8 hex digits}`). Everything else -
+ * nonces, tokens, UUID material, keys, which are longer and/or of other array types - must stay unpredictable.
+ */
+export function isRandomIdRequest(array: unknown): array is Uint8Array {
+  return (
+    array instanceof Uint8Array &&
+    Object.getPrototypeOf(array) === Uint8Array.prototype &&
+    array.length === RANDOM_ID_BYTES
+  );
+}
+
+/**
+ * Wraps `crypto.getRandomValues` (Node's global WebCrypto object; installed from `node:crypto` when missing).
+ * Previously every caller got seeded bytes while a render ran (seed 0x5eed in pass 1, a hash of the pass-1 HTML in
+ * pass 2), so nonces / tokens generated by unrelated code during SSR were predictable. Now only `randomID()`-shaped
+ * requests use the render's deterministic source; all others - and all requests when `deterministicIds` is off or
+ * no render is running - are answered by the original CSPRNG (which also keeps its argument validation:
+ * `TypeError` for float arrays, `QuotaExceededError` above 65536 bytes).
+ */
 function installCrypto(g: any): void {
   if (typeof g.crypto === 'undefined') {
     Object.defineProperty(g, 'crypto', {value: webcrypto, configurable: true, writable: true});
@@ -896,9 +968,9 @@ function installCrypto(g: any): void {
     return;
   }
   const getRandomValues = function <T extends ArrayBufferView | null>(array: T): T {
-    const source = getRandomSource();
-    if (source && array && ArrayBuffer.isView(array)) {
-      source(new Uint8Array(array.buffer, array.byteOffset, array.byteLength));
+    const source = randomSourceOptions.deterministicIds ? getRandomSource() : undefined;
+    if (source && isRandomIdRequest(array)) {
+      source(array);
       return array;
     }
     return original.call(crypto, array);
@@ -910,15 +982,41 @@ function installCrypto(g: any): void {
 const isNoop = (fn: unknown): boolean =>
   typeof fn === 'function' && fn.length === 0 && /\{\s*\}\s*$/.test(Function.prototype.toString.call(fn));
 
+/**
+ * Browser globals on `globalThis`, installed once per process and never removed.
+ *
+ * PROCESS-WIDE, PERMANENT: `window` (= `globalThis`), `navigator`, `matchMedia`, `requestAnimationFrame` /
+ * `cancelAnimationFrame` / `requestIdleCallback` (queued into the running render, dropped outside renders),
+ * `getComputedStyle`, `CSS`, no-op `addEventListener` / `removeEventListener` / `dispatchEvent` on the global,
+ * `innerWidth` & co., `screen`, `scrollTo`, the element / event classes. Every other module of the server process
+ * sees them too: libraries that sniff `typeof window !== 'undefined'` (or `typeof document`, which
+ * `@lit-labs/ssr-dom-shim` already defines) to detect a browser take their browser branch from now on. Import such
+ * libraries before `installSpectrumSsr()` / `installSpectrumDomShim()` if they decide at import time, or keep them
+ * in a separate process / worker. Lit itself is not affected (`isServer` comes from the `node` export condition).
+ *
+ * Why `window` cannot be scoped to "while the shim is active" (measured with .probe/window-scope.ts, which replaces
+ * `window` by a counting accessor; full catalog, 2 renders): 128 reads happen while the registration modules are
+ * imported (`base/src/define-element.js` writes `window.__swc` at module evaluation), and an application's import
+ * phase has no detectable end; 6344 reads happen inside the synchronous parts of renders, but 12 happen outside them
+ * during the render (`top-nav/src/TopNav.js` `manageItems` via the initial slotchange); and modules that components
+ * import lazily from `render()` (`sp-number-field` from `sp-slider`, `sp-color-handle` / `sp-color-loupe` from
+ * `sp-color-field`, chevron icons: 7 modules for those two components) are evaluated asynchronously, outside every
+ * render section - with `window` undefined their `defineElement()` would throw and the module would stay failed for
+ * the life of the process. Scoping it to the whole asynchronous duration of renders instead would make `window`
+ * flip for unrelated code running during a render's awaits (other requests), i.e. sniffing results would depend on
+ * timing, which is worse than a stable value. So `window` stays a plain global.
+ */
 function installGlobals(g: any): void {
   if (typeof g.Node === 'undefined') {
     g.Node = ShimNodeClass;
   }
   if (g.window === undefined) {
-    // `@spectrum-web-components/base` writes `window.__swc` at import time.
+    // `@spectrum-web-components/base` (`src/define-element.js`) writes `window.__swc` at import time. Process-wide
+    // and permanent, see the comment above.
     g.window = g;
   }
   g.navigator ??= {userAgent: 'node', platform: 'node', language: 'en-US', languages: ['en-US'], maxTouchPoints: 0};
+  // Never matches: see `mediaQueryList`.
   g.matchMedia ??= (query: string) => mediaQueryList(query);
   if (typeof g.requestAnimationFrame !== 'function' || isNoop(g.requestAnimationFrame)) {
     g.requestAnimationFrame = requestFrame;
@@ -1208,6 +1306,15 @@ function installFormControl(proto: object, defaultType: string): void {
  * which breaks e.g. `this.addEventListener('sp-system-context', this._handleSystemContext)` in
  * `theme/src/Theme.js`. Listeners are wrapped (one wrapper per target + listener, so de-duplication and
  * `removeEventListener` keep working) only if the shim actually calls them unbound.
+ *
+ * Retention path (fixed): the wrappers used to live in a `WeakMap<target, Map<callback, wrapper>>`. For a
+ * long-lived target - the `document` singleton - the inner (strong) Map kept every callback ever added during any
+ * render, and through the callback (`this.handleX` closures / bound methods) its element, the element's structure
+ * backing, the realm and the whole render. The table is now keyed weakly on both sides
+ * (`WeakMap<callback, WeakMap<target, wrapper>>`): an entry lives only while the callback and the target are both
+ * alive, so a removed listener no longer pins anything. Entries are not deleted on `removeEventListener`: the same
+ * callback may still be registered on the target for another type or capture flag, and its removal must find the
+ * same wrapper.
  */
 function installListenerThisBinding(): void {
   const EventTargetProto = Object.getPrototypeOf(NodeProto);
@@ -1229,25 +1336,25 @@ function installListenerThisBinding(): void {
   if (receiver === probe) {
     return;
   }
-  const wrappers = new WeakMap<object, Map<unknown, unknown>>();
+  const wrappers = new WeakMap<object, WeakMap<object, unknown>>();
   const wrapperFor = (target: object, callback: unknown, create: boolean): unknown => {
     if (typeof callback !== 'function') {
       return callback;
     }
-    let map = wrappers.get(target);
-    if (!map) {
+    let byTarget = wrappers.get(callback);
+    if (!byTarget) {
       if (!create) {
         return callback;
       }
-      map = new Map();
-      wrappers.set(target, map);
+      byTarget = new WeakMap();
+      wrappers.set(callback, byTarget);
     }
-    let wrapper = map.get(callback);
+    let wrapper = byTarget.get(target);
     if (!wrapper && create) {
       wrapper = function (this: unknown, event: Event) {
         return (callback as (this: unknown, event: Event) => unknown).call(target, event);
       };
-      map.set(callback, wrapper);
+      byTarget.set(target, wrapper);
     }
     return wrapper ?? callback;
   };

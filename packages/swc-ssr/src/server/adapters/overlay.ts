@@ -15,22 +15,33 @@ import type {ElementAdapter} from '../types.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+/**
+ * The `open` state of kept-closed overlays. The accessor below is shared by all of them: V8 stores an accessor's
+ * functions in the hidden class the property transition creates, which outlives the instance, so a per-instance
+ * closure (over the overlay) would pin the first overlay of the process - and its whole render - forever.
+ */
+const openState = new WeakMap<object, boolean>();
+const OPEN_PROPERTY: PropertyDescriptor = {
+  get(this: object) {
+    return openState.get(this) ?? false;
+  },
+  set(this: any, value: unknown) {
+    const previous = openState.get(this) ?? false;
+    const open = !!value;
+    openState.set(this, open);
+    if (previous !== open && typeof this.requestUpdate === 'function') {
+      this.requestUpdate('open', previous);
+    }
+  },
+  configurable: true,
+  enumerable: true,
+};
+const manageOpen = async () => {};
+
 export function keepClosed(element: HTMLElement): void {
-  const overlay = element as any;
-  let open = false;
-  Object.defineProperty(overlay, 'open', {
-    get: () => open,
-    set: (value: unknown) => {
-      const previous = open;
-      open = !!value;
-      if (previous !== open && typeof overlay.requestUpdate === 'function') {
-        overlay.requestUpdate('open', previous);
-      }
-    },
-    configurable: true,
-    enumerable: true,
-  });
-  Object.defineProperty(overlay, 'manageOpen', {value: async () => {}, configurable: true, writable: true});
+  openState.set(element, false);
+  Object.defineProperty(element, 'open', OPEN_PROPERTY);
+  Object.defineProperty(element, 'manageOpen', {value: manageOpen, configurable: true, writable: true});
 }
 
 export const overlayAdapter: ElementAdapter = {

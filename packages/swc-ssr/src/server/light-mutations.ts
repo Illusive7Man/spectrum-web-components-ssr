@@ -8,19 +8,37 @@
  * a second set of ids after hydration).
  *
  * The realm records `setAttribute` / `removeAttribute` calls on plain-element facades (see `TreeRealm`); after the
- * final pass they are applied to its HTML. Each changed element is located by its element-child path within its
- * tree scope - from the root for the document-level light DOM (the application's template, identical in every
- * pass), from the declarative shadow root of its host otherwise (the host is found by its `data-swc-ssr` marker of
- * the final pass) - and its start tag is edited in place. A target whose tag (or `id`) does not match the recorded
- * element is left alone (the scope rendered different content in the final pass).
+ * final pass they are applied to its HTML. Each changed element is located in its tree scope - the document-level
+ * light DOM (the application's template), or the declarative shadow root of its host (found by its `data-swc-ssr`
+ * marker of the final pass) - and its start tag is edited in place.
+ *
+ * Locating (review M4): the element-child path of the recorded node within its scope gives the candidate at the
+ * same position. The final pass may render a scope differently from the pass the facades came from (a component
+ * that renders extra elements once it knows its light DOM), so the candidate must also carry the recorded node's
+ * signature: same tag and the same identity attributes (`id`, `name`, `slot`, `type`, `role`, `part`, `for`,
+ * `href`, `src`), compared before any change was applied. When the element at the path does not match (or does not
+ * exist), the one element of the scope that matches the signature exactly (including `class`) is used; otherwise
+ * the change is skipped and reported (`warn`). Whole documents are parsed like the `ServerTree` parses them
+ * (review M5: `parse()` instead of `parseFragment()`, which drops `<html>` / `<head>` / `<body>`).
  */
-import {parseFragment, type DefaultTreeAdapterMap} from 'parse5';
-import {MARKER_ATTRIBUTE, isDocumentNode, isElementNode, type ServerTree, type TreeElementNode, type TreeNode} from './server-tree.js';
+import {parse, parseFragment, type DefaultTreeAdapterMap} from 'parse5';
+import {
+  MARKER_ATTRIBUTE,
+  isDocumentHtml,
+  isDocumentNode,
+  isElementNode,
+  type ServerTree,
+  type TreeElementNode,
+  type TreeNode,
+} from './server-tree.js';
 
 export type LightMutations = Map<TreeElementNode, Map<string, string | null>>;
 
 type P5Node = DefaultTreeAdapterMap['node'];
 type P5Element = DefaultTreeAdapterMap['element'];
+
+/** Reports a change that could not be applied; `host` is the shadow host of its scope (null: document level). */
+export type MutationWarning = (message: string, host: TreeElementNode | null) => void;
 
 interface Location {
   /** The shadow host (previous pass's tree), or null for the document-level light DOM. */
@@ -96,6 +114,38 @@ function indexMarkers(root: P5Node): Map<string, P5Element> {
   return index;
 }
 
+/** The elements of one tree scope (not descending into nested declarative shadow roots), in document order. */
+function scopeElements(root: P5Node): P5Element[] {
+  const result: P5Element[] = [];
+  const visit = (node: P5Node): void => {
+    for (const child of elementChildren(node)) {
+      result.push(child);
+      visit(child.tagName === 'template' ? ((child as {content?: P5Node}).content ?? child) : child);
+    }
+  };
+  visit(root);
+  return result;
+}
+
+/** Attributes that identify an element within its scope (compared to find the recorded element). */
+const IDENTITY_ATTRIBUTES = ['id', 'name', 'slot', 'type', 'role', 'part', 'for', 'href', 'src'];
+
+function attributeOf(element: P5Element, name: string): string | undefined {
+  return element.attrs.find((attr) => attr.name === name)?.value;
+}
+
+/** Whether `candidate` (final output) has the tag and identity attributes of `node` (previous pass, unchanged). */
+function matchesIdentity(node: TreeElementNode, candidate: P5Element): boolean {
+  if (candidate.tagName !== node.name) {
+    return false;
+  }
+  return IDENTITY_ATTRIBUTES.every((name) => node.attribs[name] === attributeOf(candidate, name));
+}
+
+function matchesClass(node: TreeElementNode, candidate: P5Element): boolean {
+  return (node.attribs.class ?? '') === (attributeOf(candidate, 'class') ?? '');
+}
+
 const STYLE_BODY_RE = /(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi;
 
 /**
@@ -143,49 +193,93 @@ type StartTagLocation = {
   attrs?: Record<string, {startOffset: number; endOffset: number}>;
 };
 
+/** Short description of a changed element for warnings, e.g. `<h2 slot="heading">` (id=... -> ...). */
+function describe(node: TreeElementNode, changes: Map<string, string | null>): string {
+  const identity = IDENTITY_ATTRIBUTES.filter((name) => node.attribs[name] !== undefined)
+    .map((name) => ` ${name}="${node.attribs[name]}"`)
+    .join('');
+  const what = [...changes].map(([name, value]) => (value === null ? `-${name}` : `${name}="${value}"`)).join(', ');
+  return `<${node.name}${identity}> (${what})`;
+}
+
 /**
  * Applies the recorded attribute changes to `html` (the output of the pass whose facades recorded them; markers
  * still present). `tree` is the tree the facades were built from; `hostId(host)` returns the final-pass marker id
- * of a shadow host of that tree.
+ * of a shadow host of that tree. Changes that cannot be applied are reported through `warn`.
  */
 export function applyLightMutations(
   html: string,
   mutations: LightMutations,
   tree: ServerTree,
-  hostId: (host: TreeElementNode) => number | undefined
+  hostId: (host: TreeElementNode) => number | undefined,
+  warn: MutationWarning = () => {}
 ): string {
   if (mutations.size === 0) {
     return html;
   }
   const {text, original} = withoutStyles(html);
-  const fragment = parseFragment(text, {sourceCodeLocationInfo: true}) as unknown as P5Node;
+  const options = {sourceCodeLocationInfo: true};
+  const root = (isDocumentHtml(text) ? parse(text, options) : parseFragment(text, options)) as unknown as P5Node;
   let markers: Map<string, P5Element> | undefined;
+  const scopes = new Map<P5Node, P5Element[]>();
   const edits: Edit[] = [];
+  const claimed = new Set<P5Element>();
   for (const [node, changes] of mutations) {
     const location = locate(node, tree);
     if (!location) {
+      // Not part of a rendered scope (e.g. a detached clone): nothing in the output corresponds to it.
       continue;
     }
-    let target: P5Node | undefined = fragment;
+    let scope: P5Node | undefined = root;
     if (location.host) {
       const id = hostId(location.host);
-      markers ??= indexMarkers(fragment);
+      markers ??= indexMarkers(root);
       const host = id === undefined ? undefined : markers.get(String(id));
-      target = host ? shadowContent(host) : undefined;
+      scope = host ? shadowContent(host) : undefined;
+      if (!scope) {
+        warn(
+          `light-DOM attribute change not applied: the shadow root of <${location.host.name}> is not in the final output: ${describe(node, changes)}`,
+          location.host
+        );
+        continue;
+      }
     }
+    let target: P5Node | undefined = scope;
     for (const index of location.path) {
       target = target ? elementChildren(target)[index] : undefined;
     }
-    if (!target || !isP5Element(target) || target.tagName !== node.name) {
-      continue;
+    let element = target && isP5Element(target) && !claimed.has(target) ? target : undefined;
+    if (!element || !matchesIdentity(node, element) || !matchesClass(node, element)) {
+      // The final pass rendered the scope differently: look for the one element with the recorded signature.
+      let elements = scopes.get(scope);
+      if (!elements) {
+        elements = scopeElements(scope);
+        scopes.set(scope, elements);
+      }
+      const exact = elements.filter(
+        (candidate) => !claimed.has(candidate) && matchesIdentity(node, candidate) && matchesClass(node, candidate)
+      );
+      if (exact.length === 1) {
+        element = exact[0];
+      } else if (!(element && matchesIdentity(node, element) && exact.length === 0)) {
+        // (An element at the recorded position whose identity matches but whose class changed between the passes
+        // is still the recorded element; anything else is ambiguous or missing.)
+        warn(
+          `light-DOM attribute change not applied: ${
+            exact.length > 1 ? `${exact.length} elements match` : 'no element matches'
+          } ${describe(node, changes)} in the final output`,
+          location.host
+        );
+        continue;
+      }
     }
-    const originalId = node.attribs.id;
-    const targetId = target.attrs.find((attr) => attr.name === 'id')?.value;
-    if (originalId !== undefined && !changes.has('id') && targetId !== originalId) {
-      continue;
-    }
-    const startTag = target.sourceCodeLocation?.startTag as StartTagLocation | undefined;
+    claimed.add(element);
+    const startTag = element.sourceCodeLocation?.startTag as StartTagLocation | undefined;
     if (!startTag) {
+      warn(
+        `light-DOM attribute change not applied: <${element.tagName}> has no start tag in the output (implied element): ${describe(node, changes)}`,
+        location.host
+      );
       continue;
     }
     for (const [name, value] of changes) {

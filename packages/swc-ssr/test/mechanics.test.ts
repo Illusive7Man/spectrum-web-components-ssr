@@ -14,6 +14,12 @@ const {LitElement, html} = await import('lit');
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+/**
+ * The x-* elements are plain Lit elements. swc-ssr drives only managed classes (Spectrum's by default) through its
+ * server lifecycle; plain Lit elements keep upstream semantics unless opted in, as these tests do for all of them.
+ */
+const MANAGED = {isManagedClass: () => true};
+
 /** Counts its light-DOM children from the constructor (like ObserveSlotPresence) and from willUpdate. */
 class XCounter extends LitElement {
   static override properties = {count: {type: Number}, fromConstructor: {type: Boolean}};
@@ -177,7 +183,7 @@ function textById(root: any, id: string): string {
 test('light-DOM facades answer queries from willUpdate and from the constructor', async () => {
   const {html: output, report} = await renderSpectrum(html`
     <x-counter><span slot="icon"></span><x-item label="a"></x-item><x-item label="b"></x-item></x-counter>
-  `);
+  `, MANAGED);
   const shadow = shadowOf(output, 'x-counter');
   assert.equal(textById(shadow, 'count'), '2');
   assert.equal(textById(shadow, 'ctor'), 'true');
@@ -185,7 +191,7 @@ test('light-DOM facades answer queries from willUpdate and from the constructor'
 });
 
 test('full lifecycle: rAF, updateComplete, shadow instances and initial slotchange', async () => {
-  const {html: output, report} = await renderSpectrum(html`<x-async>Hello <span>world</span></x-async>`);
+  const {html: output, report} = await renderSpectrum(html`<x-async>Hello <span>world</span></x-async>`, MANAGED);
   const host = findElement(parseHtml(output), (element) => element.name === 'x-async')!;
   assert.equal(host.attribs.status, 'ready', 'reflected after the rAF + updateComplete chain');
   const shadow = shadowOf(output, 'x-async');
@@ -196,14 +202,14 @@ test('full lifecycle: rAF, updateComplete, shadow instances and initial slotchan
 });
 
 test('lifecycle "none" keeps upstream semantics', async () => {
-  const {html: output} = await renderSpectrum(html`<x-async>Hello</x-async>`, {lifecycleByTag: {'x-async': 'none'}});
+  const {html: output} = await renderSpectrum(html`<x-async>Hello</x-async>`, {...MANAGED, lifecycleByTag: {'x-async': 'none'}});
   const shadow = shadowOf(output, 'x-async');
   assert.equal(textById(shadow, 'status'), 'initial');
   assert.equal(textById(shadow, 'slotted'), '');
 });
 
 test('errors are reported per element and render() falls back to the pass-1 shadow', async () => {
-  const {html: output, report} = await renderSpectrum(html`<x-broken></x-broken><x-item label="ok"></x-item>`);
+  const {html: output, report} = await renderSpectrum(html`<x-broken></x-broken><x-item label="ok"></x-item>`, MANAGED);
   const broken = report.elements.find((element) => element.tagName === 'x-broken')!;
   assert.ok(broken.errors.some((message) => message.includes('async firstUpdated failure')), broken.errors.join('\n'));
   assert.ok(broken.errors.some((message) => message.includes('render failure once ready')), broken.errors.join('\n'));
@@ -216,7 +222,7 @@ test('errors are reported per element and render() falls back to the pass-1 shad
 test('the render root shows an element its previous-pass content only once its first update has rendered', async () => {
   // Before the fix the pass-1 <input> (no `model`) was visible to the wrapped getter read at the start of the
   // first update in pass 2, and the TypeError escaped the document lifecycle: renderSpectrum() rejected.
-  const {html: output, report} = await renderSpectrum(html`<x-handles></x-handles><x-item label="next"></x-item>`);
+  const {html: output, report} = await renderSpectrum(html`<x-handles></x-handles><x-item label="next"></x-item>`, MANAGED);
   const shadow = shadowOf(output, 'x-handles');
   assert.equal(textById(shadow, 'before'), 'inputs:0', 'empty render root before the first render (as in CSR)');
   assert.equal(textById(shadow, 'after'), 'inputs:1', 'the rendered content is there from firstUpdated() on');
@@ -225,7 +231,7 @@ test('the render root shows an element its previous-pass content only once its f
 });
 
 test('a wrapped-property getter that throws is reported, not fatal', async () => {
-  const {html: output, report} = await renderSpectrum(html`<x-throwing-getter></x-throwing-getter>`);
+  const {html: output, report} = await renderSpectrum(html`<x-throwing-getter></x-throwing-getter>`, MANAGED);
   const element = report.elements.find((entry) => entry.tagName === 'x-throwing-getter')!;
   assert.ok(
     element.errors.some((message) => message.includes('initialize wrapped property state') && message.includes('wrapped getter failure')),
@@ -244,7 +250,7 @@ test('adapters: lifecycle override and beforeRender hook', async () => {
       (element as any).count = 42;
     },
   });
-  const {html: output} = await renderSpectrum(html`<x-counter><x-item></x-item></x-counter>`);
+  const {html: output} = await renderSpectrum(html`<x-counter><x-item></x-item></x-counter>`, MANAGED);
   assert.deepEqual(seen, ['x-counter:2']);
   assert.equal(textById(shadowOf(output, 'x-counter'), 'count'), '42');
 });

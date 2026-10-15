@@ -1,6 +1,9 @@
 /**
  * Client-side hooks around the first ("hydrating") update of every Lit element that has a server-rendered
- * (declarative) shadow root. Installed by chaining onto `globalThis.litElementHydrateSupport`, which
+ * (declarative) shadow root: one rendered by @lit-labs/ssr (it contains the `<!--lit-part-->` marker of the render
+ * result) or the shadow root of a Spectrum (`sp-*`) element. Other Lit elements - client-rendered ones, or ones with
+ * a declarative shadow root from another source - are left alone (lit's own hydration support applies to them).
+ * Installed by chaining onto `globalThis.litElementHydrateSupport`, which
  * `@lit-labs/ssr-client/lit-element-hydrate-support.js` defines and `lit-element` calls once when `LitElement` is
  * created - so this module must be evaluated before `lit-element` (it is, through `swc-ssr/client`, which must be the
  * first import of the client bundle). It must not import `lit` / `lit-element` itself.
@@ -23,6 +26,11 @@
  *    element renders (its first render would not match the server markup otherwise), else in a microtask after the
  *    hydrating update, when client-side rendering would get the event (see `planSlotchange`). If that is not possible
  *    (`render()` throws), real `slotchange` events are dispatched at the slots after the hydrating update instead.
+ *    The plan calls `render()` once more than client-side rendering does; it runs after `willUpdate()` (and the
+ *    controllers' `hostUpdate()`), right before the hydrating render, so that `render()` sees the state
+ *    `willUpdate()` computes. An adapter can move it to the start of the update
+ *    (`slotchangePlan: 'before-willupdate'`) when the element's `willUpdate()` has to see what the initial
+ *    slotchange sets.
  * 3. Recovery from hydration mismatches: when `hydrate()` of an element's shadow root throws (its first client
  *    render differs structurally from the server markup), lit-element would leave a half-hydrated shadow root and
  *    append a second copy of the content on the next update. Instead the server content is discarded (except
@@ -33,6 +41,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import {digestForTemplateResult} from '@lit-labs/ssr-client';
+import {hasServerMarkers, isSpectrumTag} from './elements.js';
+import {pinElementMedia, restoreElementMedia} from './match-media.js';
 import {
   childPositions,
   collectSlotchangeBindings,
@@ -51,6 +61,14 @@ export interface HydrationAdapter {
   beforeHydrate?(element: HTMLElement): void;
   /** Runs right after the hydrating `update()` (before `firstUpdated()`). */
   afterHydrate?(element: HTMLElement): void;
+  /**
+   * When the initial `slotchange` is planned (see (2) in the file comment; the plan calls `render()`):
+   * `'after-willupdate'` (default) right before the hydrating render, after `willUpdate()`;
+   * `'before-willupdate'` at the start of the first `performUpdate()`, right after `beforeHydrate`, so that the
+   * listeners invoked to make the first render match the server markup run before `willUpdate()`.
+   * The last matching adapter that sets it wins.
+   */
+  slotchangePlan?: 'before-willupdate' | 'after-willupdate';
 }
 
 const adapters: HydrationAdapter[] = [];
@@ -71,6 +89,17 @@ const hydrating = new WeakSet<object>();
 const prepared = new WeakSet<object>();
 /** How each prepared element's initial slotchange is emulated. */
 const slotchangePlans = new WeakMap<object, SlotchangePlan>();
+
+/** The `slotchangePlan` of the last matching adapter that sets one (default `'after-willupdate'`). */
+function slotchangePlanTiming(tag: string): 'before-willupdate' | 'after-willupdate' {
+  let timing: 'before-willupdate' | 'after-willupdate' = 'after-willupdate';
+  for (const adapter of adapters) {
+    if (adapter.slotchangePlan && matches(adapter, tag)) {
+      timing = adapter.slotchangePlan;
+    }
+  }
+  return timing;
+}
 
 function runAdapters(element: HTMLElement, hook: 'beforeHydrate' | 'afterHydrate'): void {
   const tag = element.localName;
@@ -301,21 +330,31 @@ function recover(element: any, error: unknown, render: RenderFunction): void {
  * Installation
  * -------------------------------------------------------------------------------------------------------------- */
 
+/**
+ * Whether the hooks apply to an element whose render root is the pre-existing (declarative) shadow root `root`:
+ * one rendered by @lit-labs/ssr (server markers), or a Spectrum element's.
+ */
+const isServerRendered = (element: HTMLElement, root: ShadowRoot): boolean =>
+  hasServerMarkers(root) || isSpectrumTag(element.localName);
+
 function patchLitElement(LitElement: any, render: RenderFunction): void {
   const proto = LitElement.prototype;
   const createRenderRoot = proto.createRenderRoot;
   proto.createRenderRoot = function (this: any) {
     const declarative = this.shadowRoot != null;
     const root = createRenderRoot.call(this);
-    if (declarative && root === this.shadowRoot) {
+    if (declarative && root === this.shadowRoot && isServerRendered(this, root)) {
       hydrating.add(this);
     }
     return root;
   };
+  /** Start of the first update (before `willUpdate()`): adapters, and the slotchange plan when planned early. */
   const prepare = (element: any): void => {
     prepared.add(element);
     runAdapters(element, 'beforeHydrate');
-    slotchangePlans.set(element, planSlotchange(element));
+    if (slotchangePlanTiming(element.localName) === 'before-willupdate') {
+      slotchangePlans.set(element, planSlotchange(element));
+    }
   };
   const performUpdate = proto.performUpdate;
   proto.performUpdate = function (this: any) {
@@ -332,6 +371,10 @@ function patchLitElement(LitElement: any, render: RenderFunction): void {
     hydrating.delete(this);
     if (!prepared.has(this)) {
       prepare(this);
+    }
+    // After willUpdate() / hostUpdate(), right before the hydrating render (unless an adapter planned it early).
+    if (!slotchangePlans.has(this)) {
+      slotchangePlans.set(this, planSlotchange(this));
     }
     try {
       update.call(this, changedProperties);
@@ -432,6 +475,29 @@ registerHydrationAdapter({
     if (!isUpgraded(item) || !content || (content.icon.length === 0 && content.content.length === 0)) {
       picker.selectedItemContent = itemChildrenFromDom(item);
     }
+  },
+});
+
+/**
+ * Components that render from a `MatchMediaController` (`reactive-controllers/src/MatchMedia.js`; found by grepping
+ * the `src/*.js` files of every `@spectrum-web-components` package for `MatchMediaController`):
+ *  - `sp-picker` (`picker/src/Picker.js`, `isMobile` / `isTouchDevice`: `sp-tray` instead of `sp-popover` as the
+ *    overlay container, menu drag-and-select), `sp-action-menu` (`action-menu/src/ActionMenu.js`, the same plus
+ *    `mobile-view` on its `sp-menu`), `sp-contextual-help` (`contextual-help/src/ContextualHelp.js`: the overlay's
+ *    `type` / `placement`, the trigger's `aria-haspopup`);
+ *  - not `sp-tray` (`tray/src/Tray.js`, `prefersMotion`): it reads it only in event handlers, not in `render()`.
+ * The server's `matchMedia()` never matches, a phone's `IS_MOBILE` does. The controllers are pinned to the server's
+ * value for the hydrating update and restored right after it with `requestUpdate()` (see `match-media.ts`), so the
+ * hydrating render matches the server markup and the next update renders the mobile state. Restoring happens before
+ * `firstUpdated()`, so `Picker.bindEvents()` picks the mobile interaction strategy.
+ */
+registerHydrationAdapter({
+  tag: /^sp-(picker|action-menu|contextual-help)$/,
+  beforeHydrate(element) {
+    pinElementMedia(element);
+  },
+  afterHydrate(element) {
+    restoreElementMedia(element as unknown as {requestUpdate?: (name?: PropertyKey, oldValue?: unknown) => void});
   },
 });
 

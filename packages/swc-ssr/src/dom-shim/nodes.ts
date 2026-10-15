@@ -14,7 +14,7 @@ import {
   HTMLSlotElement as ShimHTMLSlotElementClass,
 } from '@lit-labs/ssr-dom-shim';
 import {parseFragment, type DefaultTreeAdapterMap} from 'parse5';
-import {BACKING, getBacking, setBacking, type StructureBacking} from './hooks.js';
+import {BACKING, getBacking, reportDroppedMutation, setBacking, type StructureBacking} from './hooks.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type AnyNode = any;
@@ -78,7 +78,13 @@ export class DetachedBacking implements StructureBacking {
     }
     const previousParent = node.parentNode;
     if (previousParent) {
-      getBacking(previousParent)?.removeChild?.(node);
+      const previousBacking = getBacking(previousParent);
+      if (typeof previousBacking?.removeChild === 'function') {
+        previousBacking.removeChild(node);
+      } else if (previousBacking) {
+        // Moving a rendered node out of its (server tree) parent: it stays where it is in the output.
+        reportDroppedMutation(previousParent, 'removeChild', node);
+      }
     }
     const index = ref == null ? -1 : this.children.indexOf(ref);
     if (index === -1) {
@@ -371,13 +377,57 @@ export function cloneNode(node: AnyNode, deep: boolean): AnyNode {
 }
 
 export function insertBefore(parent: AnyNode, node: AnyNode, ref: AnyNode | null): AnyNode {
-  getBacking(parent)?.insertBefore?.(node, ref ?? null);
+  const backing = getBacking(parent);
+  if (typeof backing?.insertBefore === 'function') {
+    backing.insertBefore(node, ref ?? null);
+  } else if (backing && node != null && !isInPlace(parent, node, ref ?? null)) {
+    // A node with a server-tree (or empty rendered) structure: the insertion has no effect, report it.
+    reportDroppedMutation(parent, 'insertBefore', node);
+  }
   return node;
 }
 
+/** Whether inserting `node` before `ref` in `parent` would leave the structure as it is. */
+function isInPlace(parent: AnyNode, node: AnyNode, ref: AnyNode | null): boolean {
+  if (node?.parentNode !== parent) {
+    return false;
+  }
+  const children = childNodesOf(parent);
+  const index = children.indexOf(node);
+  return ref === null ? index === children.length - 1 : children[index + 1] === ref || ref === node;
+}
+
 export function removeChild(parent: AnyNode, node: AnyNode): AnyNode {
-  getBacking(parent)?.removeChild?.(node);
+  const backing = getBacking(parent);
+  if (typeof backing?.removeChild === 'function') {
+    backing.removeChild(node);
+  } else if (backing && node != null) {
+    reportDroppedMutation(parent, 'removeChild', node);
+  }
   return node;
+}
+
+/** `textContent` / `innerText` set on a node that cannot be mutated: reported unless the text is the same. */
+export function dropTextContent(node: AnyNode, value: unknown): void {
+  if (getBacking(node) && textContentOf(node) !== (value == null ? '' : String(value))) {
+    reportDroppedMutation(node, 'textContent');
+  }
+}
+
+/** `replaceChildren(...nodes)` on a node that cannot be mutated: reported unless the children stay the same. */
+export function dropReplaceChildren(node: AnyNode, nodes: unknown[]): void {
+  const current = childNodesOf(node);
+  const same = current.length === nodes.length && current.every((child, index) => child === nodes[index]);
+  if (getBacking(node) && !same) {
+    reportDroppedMutation(node, 'replaceChildren');
+  }
+}
+
+/** `innerHTML` set on a node that cannot be mutated: reported unless the markup is the same. */
+export function dropInnerHTML(node: AnyNode, html: unknown): void {
+  if (getBacking(node) && serializeChildren(node) !== String(html ?? '')) {
+    reportDroppedMutation(node, 'innerHTML');
+  }
 }
 
 /** Converts values passed to `append()` & co. (strings become text nodes). */

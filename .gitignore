@@ -9,3 +9,7 @@ playwright-report/
 tests/results/screenshots/
 tests/results/fidelity/
 tests/results/raw.jsonl
+.probe/
+.pack-check/
+packages/swc-ssr/package.json.orig
+*.tgz

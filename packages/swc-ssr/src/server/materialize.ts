@@ -33,6 +33,7 @@ import {Directive, directive} from 'lit/directive.js';
 import {noChange, nothing} from 'lit';
 import {reflectedAttributeName} from '@lit-labs/ssr/lib/reflected-attributes.js';
 import {ShimNode, serializeNode} from '../dom-shim/nodes.js';
+import {getCurrentRenderContext} from './context.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -223,26 +224,46 @@ interface StringsState {
 }
 const stringsStates = new WeakMap<object, StringsState>();
 
-/** Custom element tags seen in rendered templates while they were not defined (see `awaitLazyDefinitions`). */
-const undefinedTags = new Set<string>();
+/**
+ * Custom element tags that templates rendered (in the current render's thunks) while they were not defined, per
+ * render session (see `awaitLazyDefinitions`); outside of a render they are not tracked.
+ */
+const undefinedTagsBySession = new WeakMap<object, Set<string>>();
 /** Tags that were waited for once without being defined in time; never waited for again. */
 const abandonedTags = new Set<string>();
 
-/**
- * Lets definitions that were triggered by the render that just happened arrive (lazy `import()` in `render()`),
- * waiting up to `timeoutMs` for tags seen undefined in rendered templates. Each tag is waited for at most once per
- * process. Returns whether any of them got defined (the caller then renders that pass again).
- */
-export async function awaitLazyDefinitions(timeoutMs: number): Promise<boolean> {
-  const registry = (globalThis as any).customElements;
-  const waiting = [...undefinedTags].filter((tag) => !registry?.get(tag) && !abandonedTags.has(tag));
-  for (const tag of [...undefinedTags]) {
-    if (registry?.get(tag)) {
-      undefinedTags.delete(tag);
-    }
+function noteUndefinedTag(tag: string): void {
+  const session = getCurrentRenderContext()?.session;
+  if (!session) {
+    return;
   }
-  if (waiting.length === 0 || typeof registry?.whenDefined !== 'function') {
+  let tags = undefinedTagsBySession.get(session);
+  if (!tags) {
+    tags = new Set();
+    undefinedTagsBySession.set(session, tags);
+  }
+  tags.add(tag);
+}
+
+/**
+ * After a pass of `session`: whether templates of that pass rendered custom element tags that were undefined then
+ * and are defined now - then the pass must be rendered again. Tags still undefined (a component imports what it
+ * renders lazily, e.g. `slider/src/Slider.js` -> `sp-number-field`) are waited for up to `timeoutMs`, each at most
+ * once per process; nothing is waited for when every rendered tag was defined (review M6: the wait used to be on
+ * the critical path of renders that did not need it) or `timeoutMs` is 0. Resets the session's list.
+ */
+export async function awaitLazyDefinitions(session: object, timeoutMs: number): Promise<boolean> {
+  const seen = undefinedTagsBySession.get(session);
+  undefinedTagsBySession.delete(session);
+  if (!seen || seen.size === 0) {
     return false;
+  }
+  const registry = (globalThis as any).customElements;
+  // Defined while the pass was still running (e.g. a lazy import that resolved during an await of the pass).
+  const definedMeanwhile = [...seen].some((tag) => !!registry?.get(tag));
+  const waiting = [...seen].filter((tag) => !registry?.get(tag) && !abandonedTags.has(tag));
+  if (waiting.length === 0 || !(timeoutMs > 0) || typeof registry?.whenDefined !== 'function') {
+    return definedMeanwhile;
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
   await Promise.race([
@@ -252,10 +273,9 @@ export async function awaitLazyDefinitions(timeoutMs: number): Promise<boolean> 
     }),
   ]);
   clearTimeout(timer);
-  let defined = false;
+  let defined = definedMeanwhile;
   for (const tag of waiting) {
     if (registry.get(tag)) {
-      undefinedTags.delete(tag);
       defined = true;
     } else {
       abandonedTags.add(tag);
@@ -283,7 +303,7 @@ function currentStrings(strings: ArrayLike<string>): ArrayLike<string> {
         const tag = match[1].toLowerCase();
         if (!registry?.get(tag)) {
           pending.add(tag);
-          undefinedTags.add(tag);
+          noteUndefinedTag(tag);
         }
       }
     }
@@ -299,6 +319,9 @@ function currentStrings(strings: ArrayLike<string>): ArrayLike<string> {
     if (registry?.get(tag)) {
       state.pending.delete(tag);
       defined = true;
+    } else {
+      // Rendered (again) while undefined: this render may want to wait for it.
+      noteUndefinedTag(tag);
     }
   }
   if (defined) {

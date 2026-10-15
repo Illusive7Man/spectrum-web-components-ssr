@@ -9,17 +9,20 @@
  *  - `sp-tray` (`tray/src/Tray.js`), `sp-dialog-wrapper` (`dialog/src/DialogWrapper.js`): opening transitions
  *    only start on `open` *changes* and their promises simply never resolve on the server; no global state.
  */
-import {registerAdapter} from './registry.js';
+import {registerAdapter, registerInspector} from './registry.js';
 import {themeAdapter} from './theme.js';
 import {overlayAdapter} from './overlay.js';
 import {pickerAdapter} from './picker.js';
 import {breadcrumbsAdapter} from './breadcrumbs.js';
 import {colorWheelAdapter} from './color-wheel.js';
 import {splitViewAdapter} from './split-view.js';
+import {languageInspector} from './language.js';
 
 const builtIn = [themeAdapter, overlayAdapter, pickerAdapter, breadcrumbsAdapter, colorWheelAdapter, splitViewAdapter];
 for (const adapter of builtIn) {
   registerAdapter(adapter);
 }
+registerInspector(languageInspector);
 
-export {registerAdapter, findAdapter} from './registry.js';
+export {registerAdapter, findAdapter, registerInspector, inspectors} from './registry.js';
+export {isSpectrumClass} from './spectrum-class.js';
