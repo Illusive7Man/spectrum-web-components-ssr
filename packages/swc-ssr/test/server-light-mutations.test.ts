@@ -12,7 +12,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {installSpectrumSsr, renderSpectrum} from '../src/server/index.ts';
-import {findElement, formatReport, parseHtml, shadowTemplateOf, templateContent, walkElements} from './helpers.ts';
+import {findElement, formatReport, parseHtml, shadowTemplateOf, templateContent, textOf, walkElements} from './helpers.ts';
 import {parse} from 'parse5';
 import {adapter} from 'parse5-htmlparser2-tree-adapter';
 import type {Document} from 'domhandler';
@@ -122,4 +122,54 @@ test('document-level changes are applied when the template is a whole document (
   const document = parse(output, {treeAdapter: adapter}) as unknown as Document;
   const heading = findElement(document, (element) => element.name === 'h2');
   assert.equal(heading?.attribs.id, 'heading-1', formatReport(report));
+});
+
+/* Review finding (low): in shadow scopes a same-signature sibling rendered before the target received the change. */
+
+/** Marks the span with the text 'mine'; once it knows its light DOM it renders a same-signature span before it. */
+class XMarkByContent extends XScopeShift {
+  override firstUpdated() {
+    const spans = [...(this.renderRoot as any).querySelectorAll('span')];
+    spans.find((span: any) => span.textContent === 'mine')?.setAttribute('data-mark', 'mine');
+  }
+  override render() {
+    return html`${this.known ? html`<span>extra</span>` : nothing}<span>mine</span><slot></slot>`;
+  }
+}
+customElements.define('x-mark-by-content', XMarkByContent);
+
+/** Marks its only span ('a'); the final pass renders two other same-signature spans instead ('b', 'c'). */
+class XMarkAmbiguous extends XScopeShift {
+  override firstUpdated() {
+    this.renderRoot.querySelector('span')?.setAttribute('data-mark', 'ambiguous');
+  }
+  override render() {
+    return this.known ? html`<span>b</span><span>c</span><slot></slot>` : html`<span>a</span><slot></slot>`;
+  }
+}
+customElements.define('x-mark-ambiguous', XMarkAmbiguous);
+
+test('a change lands on the element with the recorded content, not on a same-signature element before it', async () => {
+  const {html: output, report} = await renderSpectrum(html`<x-mark-by-content><p>light</p></x-mark-by-content>`);
+  const spans = shadowElements(output, 'x-mark-by-content').filter((element) => element.name === 'span');
+  assert.deepEqual(
+    spans.map((span) => [textOf(span), span.attribs['data-mark'] ?? null]),
+    [
+      ['extra', null],
+      ['mine', 'mine'],
+    ],
+    formatReport(report)
+  );
+});
+
+test('an ambiguous change (several same-signature elements, none with the recorded content) is reported, not applied', async () => {
+  const {html: output, report} = await renderSpectrum(html`<x-mark-ambiguous><p>light</p></x-mark-ambiguous>`);
+  assert.ok(!output.includes('data-mark'), 'applied to none of them');
+  const host = report.elements.find((element) => element.tagName === 'x-mark-ambiguous');
+  assert.ok(
+    host?.warnings.some(
+      (message) => message.includes('light-DOM attribute change not applied') && message.includes('2 elements match')
+    ),
+    formatReport(report)
+  );
 });

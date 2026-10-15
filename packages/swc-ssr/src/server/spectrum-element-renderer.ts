@@ -149,7 +149,10 @@ export class SpectrumElementRenderer extends LitElementRenderer {
     }
     const element = this.element as any;
     const plan = this.ssrPlan;
-    const renderOptions = resolveRenderOptions(element, plan?.report);
+    // Pooled (pre-instantiated) elements: the decision made when they were created, before anything connected or
+    // updated them (realm.ts `renderOptionsOf`); elements built by this renderer: evaluated now, as upstream does.
+    const decided = plan?.instance ? plan.context.realm?.renderOptionsOf(element) : undefined;
+    const renderOptions = decided?.found ? decided.options : resolveRenderOptions(element, plan?.report);
     if (renderOptions?.disableSsr) {
       // Upstream semantics: no connectedCallback, no update, no shadow root (see renderShadow).
       this.ssrDisabled = true;

@@ -186,10 +186,14 @@ const app = express();
 app.disable('x-powered-by');
 
 /**
- * Health checks: HEAD requests (any path) are answered with 200 right away and never render. Express would
- * otherwise run the GET handler for them - a full server render of the whole catalog for every `HEAD /` that a
- * preview / uptime monitor polls with. They are logged separately from the request log: the first one at once,
- * then a count per minute (only for minutes that had any).
+ * Health checks: HEAD requests are answered with 200 right away and never render. Express would otherwise run the
+ * GET handler for them - a full server render of the whole catalog for every `HEAD /` that a preview / uptime
+ * monitor polls with. They are logged separately from the request log: the first one at once, then a count per
+ * minute (only for minutes that had any).
+ *
+ * HEAD on `/dist/*` (the client bundle) is left to `express.static`, which answers it like the GET without the body:
+ * with the file's `Content-Type` / `Content-Length` (404 for a missing file). Review finding (fixed): those requests
+ * used to get the empty health-check answer, without a `Content-Type`.
  */
 const HEAD_LOG_INTERVAL_MS = 60_000;
 let headRequests = 0;
@@ -203,7 +207,7 @@ const headLog = setInterval(() => {
 headLog.unref();
 
 app.use((req: Request, res: Response, next: NextFunction) => {
-  if (req.method !== 'HEAD') {
+  if (req.method !== 'HEAD' || req.path.startsWith('/dist/')) {
     next();
     return;
   }

@@ -284,7 +284,7 @@ where it starts (comments name the path):
 3. Session hooks (`context.ts`) are an ordered set of active sessions; ending one re-points the hooks at the most
    recent session still active (or what was there before any session). A finished session is marked `ended` and
    nothing is queued into it (it used to collect rAF callbacks and document listeners without bound when an outer
-   render finished before a nested one).
+   render finished before a nested one). Since 0.1.1 the hooks dispatch by render scope (see "Second review").
 4. V8 keeps accessor functions in the shared hidden class, so per-instance accessor closures pinned the first
    instance's render forever. `realm.ts` (event links `__host` / `__eventTargetParent`) and `adapters/overlay.ts`
    (`keepClosed` `open`) use shared accessor functions plus a `WeakMap`.
@@ -312,7 +312,7 @@ it, and a server yields between requests anyway.
   elements keep upstream behaviour unless `lifecycleByTag` / `isManagedClass` opt them in.
 * M2: rejections are attributed through an `AsyncLocalStorage` scope per render (and per element around its hooks):
   only rejections of promises the render created go into its report, to the element whose hook created them,
-  otherwise to `#render`. Late ones after the render are only logged in debug mode; everything else gets Node's
+  otherwise to `#render`. Late ones after the render: see "Second review" (M2); everything else gets Node's
   behaviour for the `--unhandled-rejections` mode (or the application's own listener decides).
 * M3: pool key = scope + tag + hash of static attributes + ordinal; adoption refused when static attributes differ;
   stale upstream attributes are removed (with `attributeChangedCallback`) before the lifecycle.
@@ -335,7 +335,8 @@ it, and a server yields between requests anyway.
 * M8: `crypto.getRandomValues` returns deterministic bytes only for `randomID()`-shaped requests (plain
   `Uint8Array(4)`) during the synchronous parts of a render; everything else uses the CSPRNG.
   `configureRandomSource({deterministicIds})` (process-wide) and `RenderSpectrumOptions.deterministicIds` (per render).
-* M9: `MatchMediaController` adapter for `sp-picker`, `sp-action-menu`, `sp-contextual-help` (pins `matches` to the
+* M9: `MatchMediaController` adapter (since 0.1.1 for every hydrating element with controllers; it was `sp-picker`,
+  `sp-action-menu`, `sp-contextual-help`) (pins `matches` to the
   server value during hydration, restores it afterwards). The server still cannot render the mobile state (no
   client hints); phones hydrate the desktop markup without a mismatch and then re-render. Covered by
   `tests/mobile.spec.ts` (390x844, touch, including the deprecated `<sp-picker><sp-menu>` variant that renders its
@@ -343,6 +344,69 @@ it, and a server yields between requests anyway.
 * L6: hooks only for `@lit-labs/ssr` shadow roots or `sp-*`; the initial-slotchange plan runs after
   `willUpdate()`/`hostUpdate()` (adapters can opt into `slotchangePlan: 'before-willupdate'`).
 * L8: runtime dependencies declared in `packages/swc-ssr/package.json`.
+
+### Second review (0.1.1)
+
+An independent reviewer reproduced twelve more findings with in-process probes (`.probe/review/*.ts`); each fix has a
+unit test that fails on 0.1.0 and passes now. The catalog output is unchanged apart from the spurious
+`<!--lit-node-->` markers after `<sp-tooltip>` (L5 below); the reports are identical; full-catalog renders stay at
+2.3-2.6 s with a flat heap (110-112 MB, `.probe/leak.ts`).
+
+* M1 (rAF sink / listener log of the wrong render; `queue.ts` 7d): the process-wide hooks pointed at the most recent
+  active session, so a timer of a finished render that requested an animation frame while the next queued render ran
+  had its frame flushed (and its error attributed) there. `context.ts` now installs dispatchers while any session is
+  active; every call is filed under the session of the caller's `AsyncLocalStorage` render scope, and only callers
+  without a scope go to the most recent active session. A finished render's frames are dropped (debug log) and its
+  late `document` listeners are removed at once (the shim now logs a listener after adding it). The selector error
+  handler and the dropped-mutation reporter dispatch the same way. Frames carry the requesting scope and their
+  callbacks run in it (errors go to that element, else to the element whose lifecycle ran last). `runInContext`
+  makes sure its code runs in the context's render scope. `setListenerLog` takes any `ListenerLog` (`{push}`).
+  `.probe/review/queue.ts` 7d: render 2's report is clean.
+* M2 (late rejections swallowed; `rejection-scope.ts`): after a render ended, rejections from its own scope (no
+  element: templates, directives, custom renderers, long-lived resources first created there) get Node's behaviour
+  (`forwardUnhandledRejection`); rejections from an element's hooks (component code of the discarded tree) become a
+  `SWC_SSR_LATE_REJECTION` process warning instead of a crash - Spectrum leaves such work behind, and
+  `test/server-rejections.test.ts` requires that it does not kill the process. Constructors now run in their
+  element's scope (realm and fresh builds), so promises they create count as the element's. While the render runs,
+  attribution is unchanged. The probe now fails with the rejection, like its control.
+* M3 (adoption by key only; `claims.ts` WHICH=5): a renderer is constructed before its element's light DOM is
+  rendered, so a construction-time key cannot contain it. `plan.ts` `verifyAdoptions` checks after each pass >= 2
+  (with the pass output parsed, reused as the next pass's tree): within a key group (scope, tag, static attributes),
+  an element whose light-DOM signature (`server-tree.ts` `lightSignature`: child tags with `slot`, text hash)
+  differs from the element it adopted, while another member of the group (this pass or the previous one) has
+  exactly that signature, adopted the wrong instance: warning `adopted candidate rejected: light DOM differs` and one
+  more pass. That pass is built from the pass output, whose ordinals already follow the new order, so the keys stay
+  as they are ("re-deriving ordinals per light signature" adds nothing once the tree reflects the new order).
+  Elements whose content merely changed (no other candidate) keep their adoption. Cost: ~70 ms on the full catalog
+  (one extra parse of the final pass), ~3 ms on one-component pages; `.probe/review/key-shift.ts` still shows 0
+  shifts, the catalog no rejections. Limitation (unchanged): an element whose own light DOM changes between the
+  passes renders with the previous pass's light DOM unless another pass is made for other reasons.
+* L4 (`renderOptions` evaluated twice; `options-twice.ts`): `TreeRealm.createInstance` stores its decision next to the
+  lifecycle mode (`renderOptionsOf`); the renderer reuses it for pooled elements and evaluates only for elements it
+  builds. One evaluation per element and pass, before connecting, as upstream.
+* L5 (host stack leak; `host-leak.ts`): `FallbackElementRenderer` (render-spectrum.ts) replaces upstream's
+  `FallbackRenderer` for non-Lit custom elements (after `LitElementRenderer`); its `renderShadow()` pops
+  `customElementHostStack`, which upstream 4.1.0 pops only when a shadow was emitted. Elements after an
+  `<sp-tooltip>` (its shadow renders `sp-tooltip-openable`) are no longer keyed in the tooltip's scope, get no
+  `__host` = tooltip, and no `defer-hydration` / `<!--lit-node-->` they should not have (upstream has the same bug).
+* L6 (timer overflow; `overflow.ts`): `timerDelay` (context.ts): delays above 2^31 - 1 ms mean "no timer"
+  (`timeoutMs`: no deadline; `lazyDefinitionWaitMs`: wait until defined, bounded by the render deadline).
+* L7 (document templates and `lang`): from pass 2 on, a whole-document template's own `<html lang>` (pass-1 tree,
+  `ServerTree.documentLanguage`) is the document language when `options.lang` is not set (`setDocumentLanguage`).
+* L8 (light mutations in shadow scopes; `mutations.ts`): the recorded element's content (child tags, text; same
+  format as `lightSignature`) is part of its signature. The element at the recorded path is used when signature and
+  content match; otherwise the one element with both, or the only element with the signature; several candidates
+  and not exactly one with the content: warning, not applied.
+* L9 (`MatchMediaController` adapter by tag): applies to every hydrating element and acts only on elements that have
+  controllers (`findMatchMediaControllers`), so subclasses under other tags are pinned too.
+* L10 (deterministic 4-byte requests): documented (API.md "Deterministic ids, caveat"); no code change - restricting
+  it to `randomID()` would need stack inspection, which breaks in bundled servers.
+* L11 (packaging): the `@lit-labs/ssr` peer is `~4.1.0` - the renderers rely on 4.1.0 internals (the element-part
+  marker passed as a static attribute, the host-stack behaviour of `custom-element-shadow`, `lib/render.js`
+  `renderThunked`); `package-lock.json` refreshed (`npm install --package-lock-only`), `npm ls` clean; the
+  `REPLACE_WITH_OWNER` placeholders stay for the owner.
+* L12 (demo): `HEAD /dist/*` goes to `express.static` (Content-Type, Content-Length, 404); other HEAD requests keep
+  the empty 200 health-check answer (`tests/server.spec.ts`).
 
 ### Process-wide state
 
@@ -355,8 +419,13 @@ it, and a server yields between requests anyway.
   chevron icons) evaluate asynchronously and would throw in `defineElement` and stay failed. Libraries that sniff
   `typeof window` take their browser branch once the shim is installed: import them first or isolate them in a
   worker.
-* The `unhandledRejection` listener (see M2) is installed with the first render and kept.
-* `document.documentElement.lang` is set per render (`lang`) and restored.
+* The `unhandledRejection` listener (see M2) is installed with the first render and kept. Rejections of a finished
+  render's own scope get Node's behaviour; those of its elements' hooks a `SWC_SSR_LATE_REJECTION` warning.
+* While renders run, the rAF sink, the `document` listener log, the selector error handler and the dropped-mutation
+  reporter are dispatchers that file each call under the caller's render (by `AsyncLocalStorage` scope); outside
+  renders the hooks that were there before are back.
+* `document.documentElement.lang` is set per render (`lang`, else a whole-document template's own `<html lang>` from
+  pass 2 on) and restored.
 * Module-level instance counters in Spectrum ids (`sp-dialog-label-N`) make the output of the first and later renders
   of one process differ slightly; fidelity tests normalize them.
 

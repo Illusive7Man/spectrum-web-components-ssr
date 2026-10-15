@@ -19,7 +19,9 @@
  */
 import {LitElementRenderer} from '@lit-labs/ssr/lib/lit-element-renderer.js';
 import {renderThunked} from '@lit-labs/ssr/lib/render.js';
-import type {ElementRendererConstructor} from '@lit-labs/ssr/lib/element-renderer.js';
+import {FallbackRenderer, type ElementRendererConstructor} from '@lit-labs/ssr/lib/element-renderer.js';
+import type {RenderInfo} from '@lit-labs/ssr/lib/render-value.js';
+import type {ThunkedRenderResult} from '@lit-labs/ssr/lib/render-result.js';
 import {_$LE} from 'lit-element/private-ssr-support.js';
 import {installSpectrumDomShim} from '../dom-shim/index.js';
 import {
@@ -32,8 +34,11 @@ import {
   RenderContext,
   RenderSession,
   errorMessage,
+  setDocumentLanguage,
+  timerDelay,
 } from './context.js';
 import {controllersOf, disconnectAll, hasPendingUpdate, isManaged, runDocumentLifecycle} from './lifecycle.js';
+import {needsAdoptionCheck, verifyAdoptions} from './plan.js';
 import {TreeRealm} from './realm.js';
 import {MARKER_ATTRIBUTE, ServerTree} from './server-tree.js';
 import {awaitLazyDefinitions, finalizeHtml, takeTextareaContent} from './materialize.js';
@@ -116,11 +121,34 @@ async function collect(result: unknown, context: RenderContext): Promise<string>
   return out;
 }
 
+/**
+ * Review finding (fixed): renderer for every other custom element - non-Lit custom elements such as
+ * `sp-tooltip-openable`, which `tooltip/src/Tooltip.js` renders in its shadow root - instead of upstream's
+ * `FallbackRenderer` (same output: the attributes, no shadow root). `@lit-labs/ssr` 4.1.0 pushes every custom
+ * element onto `customElementHostStack` before calling `renderShadow()` and pops it only when that returned a shadow
+ * (`custom-element-shadow` in `lib/render-value.js`). `FallbackRenderer.renderShadow()` returns `undefined`, so its
+ * element stayed on the stack (popped instead of its real host when that host's shadow ended), and every element
+ * rendered after it - e.g. everything after an `<sp-tooltip>` - counted as nested in that host: keyed in its scope,
+ * `__host` = the tooltip, a `defer-hydration` attribute and a `<!--lit-node-->` marker it should not get. This
+ * renderer pops the stack itself, like `SpectrumElementRenderer` does for `disableSsr` elements.
+ */
+export class FallbackElementRenderer extends FallbackRenderer {
+  static override matchesClass(): boolean {
+    return true;
+  }
+
+  override renderShadow(renderInfo: RenderInfo): ThunkedRenderResult | undefined {
+    renderInfo.customElementHostStack.pop();
+    return undefined;
+  }
+}
+
 function renderersFor(options: RenderSpectrumOptions): ElementRendererConstructor[] {
   return [
     ...(options.elementRenderers ?? []),
     ...spectrumElementRenderers,
     LitElementRenderer as unknown as ElementRendererConstructor,
+    FallbackElementRenderer as unknown as ElementRendererConstructor,
   ];
 }
 
@@ -246,13 +274,17 @@ interface RenderProgress {
   created: RenderContext[];
 }
 
-/** Resolves true when `work` settles in time, false at the deadline (`work` keeps running; its result is ignored). */
+/**
+ * Resolves true when `work` settles in time, false at the deadline (`work` keeps running; its result is ignored).
+ * No deadline for 0, negative values, NaN, Infinity and anything beyond the longest timer delay (`timerDelay`).
+ */
 function withDeadline(work: Promise<void>, timeoutMs: number): Promise<boolean> {
-  if (!(timeoutMs > 0) || timeoutMs === Infinity) {
+  const delay = timeoutMs > 0 ? timerDelay(timeoutMs) : undefined;
+  if (delay === undefined) {
     return work.then(() => true);
   }
   return new Promise<boolean>((resolve, reject) => {
-    const timer = setTimeout(() => resolve(false), timeoutMs);
+    const timer = setTimeout(() => resolve(false), delay);
     work.then(
       () => {
         clearTimeout(timer);
@@ -300,15 +332,22 @@ async function runPasses(value: unknown, session: RenderSession, progress: Rende
   session.debug(`pass 1: ${first.records.size} elements, ${html.length} chars`);
 
   // Pass 2 (and possibly 3): render with the light-DOM / shadow information of the previous pass.
+  /** The previous pass's output, parsed already (to verify its adoptions). */
+  let parsed: ServerTree | undefined;
   for (let pass = 2; pass <= MAX_PASSES; pass++) {
     session.checkAborted();
     const previous = progress.passes[progress.passes.length - 1];
     let tree: ServerTree;
     try {
-      tree = new ServerTree(html);
+      tree = parsed ?? new ServerTree(html);
     } catch (error) {
       session.orphanWarnings.push(`could not parse the pass-${previous.pass} HTML: ${errorMessage(error)}`);
       break;
+    }
+    parsed = undefined;
+    if (options.lang === undefined) {
+      // A whole-document template's own `<html lang>` is the document language from now on (see context.ts).
+      setDocumentLanguage(session, tree.documentLanguage());
     }
     const context = newContext(session, pass, previous, tree, hashString(html));
     context.realm = new TreeRealm(context, tree);
@@ -324,11 +363,22 @@ async function runPasses(value: unknown, session: RenderSession, progress: Rende
     session.debug(`pass ${pass}: ${context.nextId} elements, ${html.length} chars`);
     const canRetry = pass < MAX_PASSES;
     // Elements without tree information that failed (e.g. a component that reads its own shadow DOM in
-    // firstUpdated() but whose shadow content only appeared in this pass), or elements updated after their markup
-    // was emitted, get one more pass.
+    // firstUpdated() but whose shadow content only appeared in this pass), elements updated after their markup
+    // was emitted, and elements that adopted another element's previous-pass instance (see `verifyAdoptions`)
+    // get one more pass.
     const failedUntracked = context.untracked.some((report) => report.errors.length > 0);
     const late = findLateUpdates(context, canRetry);
-    if (!failedUntracked && late === 0) {
+    let rejected = 0;
+    if (needsAdoptionCheck(context)) {
+      try {
+        parsed = new ServerTree(html);
+        rejected = verifyAdoptions(context, parsed, canRetry);
+      } catch (error) {
+        parsed = undefined;
+        session.orphanWarnings.push(`could not verify the elements of pass ${pass}: ${errorMessage(error)}`);
+      }
+    }
+    if (!failedUntracked && late === 0 && rejected === 0) {
       break;
     }
   }

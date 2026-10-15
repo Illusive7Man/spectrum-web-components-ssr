@@ -490,14 +490,24 @@ registerHydrationAdapter({
  * value for the hydrating update and restored right after it with `requestUpdate()` (see `match-media.ts`), so the
  * hydrating render matches the server markup and the next update renders the mobile state. Restoring happens before
  * `firstUpdated()`, so `Picker.bindEvents()` picks the mobile interaction strategy.
+ *
+ * Review finding (fixed): the adapter matched only those three tags, so a subclass registered under another tag
+ * (`class MyPicker extends Picker`, `<my-picker>`) or an application component with its own controller hydrated with
+ * the phone's value (a mismatch). It now applies to every hydrating element and acts only on elements that have
+ * `MatchMediaController`s (found by shape, `findMatchMediaControllers`).
  */
+const mediaPinned = new WeakSet<object>();
 registerHydrationAdapter({
-  tag: /^sp-(picker|action-menu|contextual-help)$/,
+  tag: /^/,
   beforeHydrate(element) {
-    pinElementMedia(element);
+    if (pinElementMedia(element) > 0) {
+      mediaPinned.add(element);
+    }
   },
   afterHydrate(element) {
-    restoreElementMedia(element as unknown as {requestUpdate?: (name?: PropertyKey, oldValue?: unknown) => void});
+    if (mediaPinned.delete(element)) {
+      restoreElementMedia(element as unknown as {requestUpdate?: (name?: PropertyKey, oldValue?: unknown) => void});
+    }
   },
 });
 

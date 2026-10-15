@@ -166,3 +166,41 @@ test('renderOptions connectedCallback: true / false (H1)', async (t) => {
   assert.equal(opted.firstUpdated, 0);
   assert.equal(stateOf(output, 'x-spectrum-noconnect'), 'initial');
 });
+
+/** Reflects `ready` in its first update (it is set in connectedCallback). */
+class XReflectsReady extends SpectrumElement {
+  static override properties = {ready: {type: Boolean, reflect: true}};
+  declare ready: boolean;
+  constructor() {
+    super();
+    this.ready = false;
+  }
+  override connectedCallback() {
+    super.connectedCallback();
+    this.ready = true;
+  }
+  override render() {
+    return html`<span id="state">rendered</span>`;
+  }
+}
+customElements.define('x-reflects-ready', XReflectsReady);
+
+test('renderOptions are decided once per element, before it is connected, also for pre-instantiated elements', async (t) => {
+  // Review finding: the renderer evaluated the callbacks again when it adopted a pooled instance - after the
+  // document lifecycle had connected and updated it - so a callback depending on an attribute the element reflects
+  // in its first update flipped to disableSsr for an element that was already connected and updated.
+  const seen: Array<string | null> = [];
+  const callback = (element: HTMLElement) => {
+    if (element.localName !== 'x-reflects-ready') {
+      return undefined;
+    }
+    seen.push(element.getAttribute('ready'));
+    return element.hasAttribute('ready') ? {disableSsr: true} : undefined;
+  };
+  renderOptions.push(callback);
+  t.after(() => renderOptions.splice(renderOptions.indexOf(callback), 1));
+  const {html: output} = await renderSpectrum(html`<x-reflects-ready></x-reflects-ready>`);
+  assert.deepEqual(seen, [null, null], 'evaluated once per pass, before the element is connected (as upstream does)');
+  assert.ok(shadowTemplateOf(hostOf(output, 'x-reflects-ready')), 'rendered with its shadow root (the decision made before connecting)');
+  assert.equal(stateOf(output, 'x-reflects-ready'), 'rendered');
+});

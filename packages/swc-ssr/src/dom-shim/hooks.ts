@@ -85,8 +85,9 @@ let rafIds = 0;
 
 /**
  * The shim's `requestAnimationFrame` queues callbacks into the sink of the render that is in progress (the
- * renderer flushes them synchronously, frame by frame). Outside of a render callbacks are dropped: nothing would
- * ever run them and keeping them would retain the elements they close over.
+ * renderer flushes them synchronously, frame by frame; its sink files each frame under the render whose code
+ * requested it). Outside of a render callbacks are dropped: nothing would ever run them and keeping them would
+ * retain the elements they close over.
  */
 export function setRafSink(sink: RafSink | undefined): RafSink | undefined {
   const previous = rafSink;
@@ -130,14 +131,23 @@ export function getRandomSource(): typeof randomSource {
  * ------------------------------------------------------------------------------------------------------------ */
 
 export type ListenerRecord = [target: EventTarget, type: string, listener: unknown, options: unknown];
-let listenerLog: ListenerRecord[] | undefined;
 
 /**
- * Listeners that components add to process-wide singletons (`document`, `window`) while a render is in progress
- * are logged here so the renderer can remove them when the render is over; otherwise every render would leak its
- * element instances through those singletons.
+ * Where listener records go: an array (the records are kept), or a sink that decides per record (the server
+ * renderer installs one that files each record under the render whose code added the listener).
  */
-export function setListenerLog(log: ListenerRecord[] | undefined): ListenerRecord[] | undefined {
+export interface ListenerLog {
+  push(record: ListenerRecord): unknown;
+}
+
+let listenerLog: ListenerLog | undefined;
+
+/**
+ * Listeners that components add to process-wide singletons (`document`) while a render is in progress are logged
+ * here (after they were added) so the renderer can remove them when the render is over; otherwise every render
+ * would leak its element instances through those singletons.
+ */
+export function setListenerLog(log: ListenerLog | undefined): ListenerLog | undefined {
   const previous = listenerLog;
   listenerLog = log;
   return previous;

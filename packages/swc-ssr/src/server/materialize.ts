@@ -33,7 +33,7 @@ import {Directive, directive} from 'lit/directive.js';
 import {noChange, nothing} from 'lit';
 import {reflectedAttributeName} from '@lit-labs/ssr/lib/reflected-attributes.js';
 import {ShimNode, serializeNode} from '../dom-shim/nodes.js';
-import {getCurrentRenderContext} from './context.js';
+import {getCurrentRenderContext, timerDelay} from './context.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -265,12 +265,19 @@ export async function awaitLazyDefinitions(session: object, timeoutMs: number): 
   if (waiting.length === 0 || !(timeoutMs > 0) || typeof registry?.whenDefined !== 'function') {
     return definedMeanwhile;
   }
+  // `Infinity` (and anything beyond the longest timer delay, which Node would turn into 1 ms): wait until the
+  // definitions arrive, bounded only by the render's deadline (`timeoutMs` of the render).
+  const delay = timerDelay(timeoutMs);
   let timer: ReturnType<typeof setTimeout> | undefined;
   await Promise.race([
     Promise.all(waiting.map((tag) => registry.whenDefined(tag))),
-    new Promise((resolve) => {
-      timer = setTimeout(resolve, timeoutMs);
-    }),
+    ...(delay === undefined
+      ? []
+      : [
+          new Promise((resolve) => {
+            timer = setTimeout(resolve, delay);
+          }),
+        ]),
   ]);
   clearTimeout(timer);
   let defined = definedMeanwhile;

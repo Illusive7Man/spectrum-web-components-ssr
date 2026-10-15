@@ -4,7 +4,8 @@
  * Upstream evaluates them in `LitElementRenderer.connectedCallback()`, i.e. after the element's static and dynamic
  * attributes were set; swc-ssr evaluates them at the same point for the elements its renderers build, and for
  * pre-instantiated (pooled) elements right after their recorded attributes / properties were applied - before
- * anything connects or updates them.
+ * anything connects or updates them. Once per element and pass: the renderer that adopts a pooled instance reuses
+ * that decision (`TreeRealm.renderOptionsOf`) instead of evaluating the callbacks again on the updated element.
  */
 import {LitElementRenderer} from '@lit-labs/ssr/lib/lit-element-renderer.js';
 import {errorMessage} from './context.js';

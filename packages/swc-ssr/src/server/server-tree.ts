@@ -61,6 +61,8 @@ export interface SerializeOptions {
 
 export class ServerTree {
   readonly root: Document;
+  /** Whether the HTML was a whole document (parsed with `parse()`, see `isDocumentHtml`). */
+  readonly isDocument: boolean;
   private readonly nodesById = new Map<number, Element>();
   private readonly idsByNode = new Map<Element, number>();
   private readonly shadows = new Map<Element, Document>();
@@ -83,9 +85,19 @@ export class ServerTree {
       this.styles.push(css);
       return `${open}/*${STYLE_PLACEHOLDER}${this.styles.length - 1}*/${close}`;
     });
-    const parseHtml = isDocumentHtml(compact) ? parse : parseFragment;
+    this.isDocument = isDocumentHtml(compact);
+    const parseHtml = this.isDocument ? parse : parseFragment;
     this.root = parseHtml(compact, {treeAdapter: htmlparser2Adapter}) as unknown as Document;
     this.index(this.root);
+  }
+
+  /** Whole documents: the `lang` of their `<html>` element (undefined when absent or empty, and for fragments). */
+  documentLanguage(): string | undefined {
+    if (!this.isDocument) {
+      return undefined;
+    }
+    const html = this.root.children.find((node): node is Element => isElementNode(node) && node.name === 'html');
+    return html?.attribs.lang?.trim() || undefined;
   }
 
   private restoreStyles(text: string): string {
@@ -240,6 +252,50 @@ export class ServerTree {
 /** Child nodes the DOM would expose (elements and text; comments such as Lit markers are skipped). */
 export function childNodes(parent: ParentNode): ChildNode[] {
   return parent.children.filter((node) => isElementNode(node) || isTextNode(node));
+}
+
+/** FNV-1a hash of a string, base 36. */
+function shortHash(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+/** Elements whose text is not content (CSS is also replaced by placeholders in the tree). */
+const NON_CONTENT = new Set(['template', 'style', 'script']);
+
+/** Text content of a light-DOM subtree (comments, shadow roots and `NON_CONTENT` elements excluded). */
+function lightText(node: AnyNode, out: string[]): void {
+  for (const child of (node as ParentNode).children ?? []) {
+    if (isTextNode(child)) {
+      out.push(child.data);
+    } else if (isElementNode(child) && !NON_CONTENT.has(child.name)) {
+      lightText(child, out);
+    }
+  }
+}
+
+/**
+ * Signature of an element's light DOM: its child elements (tag and `slot`) and a hash of its text content with
+ * whitespace collapsed. Declarative shadow roots are detached by the tree, so only light DOM counts. The same format
+ * is computed for parse5 elements of a pass output in light-mutations.ts (`fingerprintOf`, via `signatureOf`).
+ */
+export function lightSignature(node: Element): string {
+  const tags = node.children
+    .filter(isElementNode)
+    .map((child) => (child.attribs.slot !== undefined ? `${child.name}[${child.attribs.slot}]` : child.name))
+    .join(',');
+  const text: string[] = [];
+  lightText(node, text);
+  return signatureOf(tags, text.join(''));
+}
+
+/** `tags|hash of the text` (see `lightSignature`). */
+export function signatureOf(tags: string, text: string): string {
+  return `${tags}|${shortHash(text.replace(/\s+/g, ' ').trim())}`;
 }
 
 function detach(node: ChildNode): void {

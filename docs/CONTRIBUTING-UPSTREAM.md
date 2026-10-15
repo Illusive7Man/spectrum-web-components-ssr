@@ -198,6 +198,14 @@ needs a changeset (`npm run changeset`), tests (`npm test`, Playwright in Chromi
 and `npm run format`, and commits signed off with `git commit -s` (Developer Certificate of Origin, no CLA mentioned).
 Lit is BSD-3-Clause, so contributions to it carry that license rather than this repository's Apache-2.0.
 
+A bug of `@lit-labs/ssr` 4.1.0 itself (`lib/render-value.js`, opcode `custom-element-shadow`) that would be a small,
+focused PR with a test: the renderer is pushed onto `customElementHostStack` before `renderShadow()` and popped only
+when a shadow was emitted, so a custom element without a shadow (any `FallbackRenderer` element, i.e. every non-Lit
+custom element, e.g. `sp-tooltip-openable` in `sp-tooltip`'s shadow root) stays on the stack, and every later element
+of the render counts as nested in its host (extra `defer-hydration`, `<!--lit-node-->` markers, wrong `__host`).
+swc-ssr works around it with its own fallback renderer (`FallbackElementRenderer` in `render-spectrum.ts`); the fix
+upstream is to pop in every case. Unverified against Lit `main`: check before filing.
+
 Not proposed to Lit: `window = globalThis` and the other process-wide globals (the shim deliberately avoids defining
 browser-detection globals), the light-DOM facades, the lifecycle driver and everything Spectrum-specific. A Lit-level
 way to give custom element renderers access to the light DOM would remove the need for pass 1, but it is a design change

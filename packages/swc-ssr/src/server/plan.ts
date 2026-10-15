@@ -6,11 +6,11 @@ import {_$LH} from 'lit-html/private-ssr-support.js';
 import {setBacking, setConstructionHook, BACKING} from '../dom-shim/hooks.js';
 import {createPlainElement} from '../dom-shim/nodes.js';
 import {constructElement} from './construct.js';
-import {errorMessage, type ElementRecord, type RenderContext} from './context.js';
+import {errorMessage, withElementScope, type ElementRecord, type RenderContext} from './context.js';
 import {markManaged} from './lifecycle.js';
 import {attachShadowRoot, emptyBacking} from './realm.js';
 import {findAdapter} from './adapters/registry.js';
-import type {TreeElementNode} from './server-tree.js';
+import {lightSignature, type ServerTree, type TreeElementNode} from './server-tree.js';
 import type {AdapterContext, ElementAdapter, ElementReport, LifecycleMode} from './types.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -124,6 +124,7 @@ export function planElement(context: RenderContext, tag: string): ElementPlan {
     return plan;
   }
   plan.previousRecord = previousRecord;
+  plan.record.adoptedFrom = previousRecord.id;
   plan.node = context.tree?.byId(previousRecord.id);
   if (plan.node && context.realm && !context.claimed.has(key)) {
     const instance = context.realm.instanceForNode(plan.node);
@@ -167,7 +168,8 @@ export function buildElement(tag: string, plan: ElementPlan | undefined): {eleme
       })
     : undefined;
   try {
-    return {element: constructElement(ctor), failed: false};
+    // In the element's scope: promises its constructor creates belong to it (see context.ts onUnhandledRejection).
+    return {element: withElementScope(plan?.report, () => constructElement(ctor)), failed: false};
   } catch (error) {
     plan?.report.errors.push(`constructor: ${errorMessage(error)}`);
     return {element: createPlainElement(tag), failed: true};
@@ -199,6 +201,118 @@ export function prepareFreshElement(element: any, plan: ElementPlan | undefined)
       markManaged(element, plan.report);
     }
   }
+}
+
+/* ------------------------------------------------------------------------------------------------------------ *
+ * Verifying adoptions after a pass
+ * ------------------------------------------------------------------------------------------------------------ */
+
+/** Elements of one pass and of the previous pass that share tree scope, tag and static attributes (key minus ordinal). */
+interface KeyGroup {
+  current: ElementRecord[];
+  previous: ElementRecord[];
+}
+
+const groupOf = (key: string): string => key.slice(0, key.lastIndexOf(':'));
+
+function keyGroups(context: RenderContext): Map<string, KeyGroup> {
+  const groups = new Map<string, KeyGroup>();
+  const group = (key: string): KeyGroup => {
+    const name = groupOf(key);
+    let entry = groups.get(name);
+    if (!entry) {
+      entry = {current: [], previous: []};
+      groups.set(name, entry);
+    }
+    return entry;
+  };
+  for (const record of context.records.values()) {
+    group(record.key).current.push(record);
+  }
+  for (const record of context.previous?.records.values() ?? []) {
+    group(record.key).previous.push(record);
+  }
+  return groups;
+}
+
+/** Groups in which an element was matched by ordinal while another element of the same kind was a candidate too. */
+function ambiguousGroups(context: RenderContext): KeyGroup[] {
+  if (!context.previous || !context.tree) {
+    return [];
+  }
+  return [...keyGroups(context).values()].filter(
+    (group) =>
+      (group.current.length > 1 || group.previous.length > 1) &&
+      group.current.some((record) => record.adoptedFrom !== undefined)
+  );
+}
+
+/** Whether `verifyAdoptions` has anything to check after this pass (it needs the pass output parsed). */
+export function needsAdoptionCheck(context: RenderContext): boolean {
+  return ambiguousGroups(context).length > 0;
+}
+
+/**
+ * Review finding (fixed): pass >= 2 matches an element with the previous pass's element of the same key - tree scope
+ * + tag + static attributes + ordinal - when upstream constructs its renderer, which is before the element's light
+ * DOM is rendered (upstream gives renderers nothing but the tag and the static attributes). So when a component
+ * renders a same-tag element with identical static attributes BEFORE an existing one once it knows its own light
+ * DOM (or drops or reorders such elements), the elements took over each other's instance, light-DOM facade and
+ * state, silently.
+ *
+ * After the pass, `tree` (the pass's own output) shows every element's light DOM. An element whose light DOM differs
+ * from that of the previous-pass element it adopted, while another element of the same kind (tag, static
+ * attributes, scope) has exactly that light DOM - in this pass, or in the previous one - was matched with the wrong
+ * element: it is reported (`adopted candidate rejected: light DOM differs`), and the caller makes another pass.
+ * That pass is built from this pass's output, where the ordinals already follow the new order, so every element
+ * then adopts its own previous element (its light DOM and state). A light-DOM signature cannot be part of the key
+ * itself: it is unknown when the renderer is constructed. Elements whose light DOM simply changed between the
+ * passes (the same element with new content) are not affected: no other element has their previous light DOM.
+ * Returns the number of rejected adoptions.
+ */
+export function verifyAdoptions(context: RenderContext, tree: ServerTree, willRetry: boolean): number {
+  const previous = context.previous;
+  const previousTree = context.tree;
+  if (!previous || !previousTree) {
+    return 0;
+  }
+  const signatures = new Map<ElementRecord, string | undefined>();
+  const signature = (record: ElementRecord, of: ServerTree): string | undefined => {
+    if (!signatures.has(record)) {
+      const node = of.byId(record.id);
+      signatures.set(record, node ? lightSignature(node) : undefined);
+    }
+    return signatures.get(record);
+  };
+  let rejected = 0;
+  for (const group of ambiguousGroups(context)) {
+    for (const record of group.current) {
+      const source = record.adoptedFrom === undefined ? undefined : previous.records.get(record.adoptedFrom);
+      if (!source) {
+        continue;
+      }
+      const mine = signature(record, tree);
+      const theirs = signature(source, previousTree);
+      if (mine === undefined || theirs === undefined || mine === theirs) {
+        continue;
+      }
+      const belongsElsewhere =
+        group.current.some((other) => other !== record && signature(other, tree) === theirs) ||
+        group.previous.some((other) => other !== source && signature(other, previousTree) === mine);
+      if (!belongsElsewhere) {
+        continue;
+      }
+      rejected++;
+      context.reportsByKey
+        .get(record.key)
+        ?.warnings.push(
+          `adopted candidate rejected: light DOM differs from the pass-${previous.pass} <${record.tag}> it was matched ` +
+            'with (another element of the same kind in this scope has that light DOM)' +
+            (willRetry ? '; another pass is made' : '; the output may show the state of that element')
+        );
+    }
+  }
+  return rejected;
 }
 
 export function sameValue(a: unknown, b: unknown): boolean {

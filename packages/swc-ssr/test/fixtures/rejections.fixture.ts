@@ -9,8 +9,15 @@
  * SCENARIO=unrelated    the same unrelated rejection, no application listener: Node's default must apply (the
  *                       process fails with that error).
  * SCENARIO=late         an element's hook schedules a rejection that happens after the render is over, no
- *                       application listener: it belongs to the (finished) render, the process must not fail.
+ *                       application listener: it belongs to the (finished) render, the process must not fail (a
+ *                       process warning is printed).
+ * SCENARIO=late-root    a long-lived resource first created inside a render, outside of any element hook (here: an
+ *                       interval started by a custom element renderer, like a lazily created client or pool of the
+ *                       application) rejects after the render is over, no application listener: Node's default
+ *                       must apply (the process fails with that error).
  */
+import {ElementRenderer} from '@lit-labs/ssr/lib/element-renderer.js';
+import type {ElementRendererConstructor} from '@lit-labs/ssr/lib/element-renderer.js';
 import {installSpectrumSsr, renderSpectrum} from '../../src/server/index.ts';
 
 installSpectrumSsr();
@@ -24,6 +31,38 @@ if (scenario === 'attribution') {
   process.on('unhandledRejection', (reason) => {
     seenByApp.push(reason instanceof Error ? reason.message : String(reason));
   });
+}
+
+/** Starts an application-level interval the first time it renders; the interval fails 3 ticks later. */
+let intervalStarted = false;
+class StartsInterval extends ElementRenderer {
+  static override matchesClass(_ctor: unknown, tagName: string): boolean {
+    return tagName === 'x-starts-interval';
+  }
+  override renderShadow(): string[] {
+    if (!intervalStarted) {
+      intervalStarted = true;
+      let ticks = 0;
+      const timer = setInterval(() => {
+        if (++ticks === 3) {
+          clearInterval(timer);
+          void Promise.reject(new Error('rejection of a resource created during a render'));
+        }
+      }, 30);
+    }
+    return ['<b>ok</b>'];
+  }
+}
+customElements.define('x-starts-interval', class extends HTMLElement {});
+
+if (scenario === 'late-root') {
+  const {report} = await renderSpectrum(html`<x-starts-interval></x-starts-interval>`, {
+    elementRenderers: [StartsInterval as unknown as ElementRendererConstructor],
+  });
+  // The process must fail before this resolves (Node's default for an unhandled rejection).
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  console.log(JSON.stringify({messages: report.elements.flatMap((element) => element.warnings), seenByApp}));
+  process.exit(0);
 }
 
 class XRejecting extends SpectrumElement {

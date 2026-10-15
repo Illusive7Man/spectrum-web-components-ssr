@@ -38,7 +38,7 @@ The order of events (Discussion first, then this comment, then an issue or PR) i
 > - A page with all entries (1,378 custom elements), the template-free hydration path, a German-localized page and three
 >   phone-sized checks (picker, action menu, contextual help) pass.
 > - Repeated renders of the whole catalog: about 110 MB heap after GC, no growth; one render takes 2.3 to 2.9 s for
->   about 19 MB of HTML. 97 unit tests.
+>   about 19 MB of HTML. 116 unit tests.
 >
 > **Known limitations.**
 >
@@ -65,7 +65,7 @@ The order of events (Discussion first, then this comment, then an issue or PR) i
   prioritise, no promise about maintenance beyond what exists.
 - Where each number comes from: matrix lines in `tests/results/summary.md` (header lines and the Pages table);
   1,378 elements is the hydrated count of the all-components page; memory and timing are from the hardening work recorded
-  in `docs/DESIGN.md` ("Hardening", "Memory"); 97 is the `npm run test:unit` count of 2026-10-15.
+  in `docs/DESIGN.md` ("Hardening", "Memory"); 116 is the `npm run test:unit` count of 2026-10-15 (0.1.1).
 - The last sentence offers bug-fix PRs because 1st-gen accepts bug fixes only; check those three spots against current
   `main` before you mention them (the list is in CONTRIBUTING-UPSTREAM.md section 4, marked unverified).
 - Do not paste the whole matrix into the issue; link the repository file.

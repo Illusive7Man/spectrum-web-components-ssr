@@ -14,11 +14,26 @@ export interface RandomSourceOptions { deterministicIds?: boolean; }   // defaul
 export function configureRandomSource(options: RandomSourceOptions): Required<RandomSourceOptions>; // returns previous
 export function isRandomIdRequest(array: unknown): array is Uint8Array;
 export function setSelectorErrorHandler(handler: SelectorErrorHandler | undefined): SelectorErrorHandler | undefined; // returns previous
+// Internal hooks the renderer plugs into (also exported): setRafSink(sink), setListenerLog(log), setRandomSource(fn),
+// setConstructionHook(fn), each returning the previous value. `setListenerLog` takes any `ListenerLog`
+// (`{push(record)}`; an array is one); document listeners are logged after they were added.
 ```
+
+**Deterministic ids, caveat.** The deterministic source cannot tell who asks: *any* plain `Uint8Array(4)` request made
+synchronously during a render - also by application code in a template, a directive or a custom element renderer -
+gets the render's deterministic bytes (the same in every render of the same page). Spectrum's `randomID()` is the
+only Spectrum caller of that shape. Do not use 4-byte `getRandomValues` results for anything secret inside render
+code, or turn the deterministic ids off: per render with `renderSpectrum(value, {deterministicIds: false})`, for the
+process with `configureRandomSource({deterministicIds: false})` (Spectrum's ids then differ between the passes and
+renders of a page, which can break server-rendered `aria-labelledby` / `id` pairs). Restricting it to `randomID()`
+itself would need a stack inspection per request, which breaks as soon as the server is bundled; it is not done.
+`randomID()` calls made outside the synchronous parts of a render (e.g. in a microtask a component scheduled) use the
+CSPRNG, so those ids differ between renders.
 
 `installSpectrumDomShim()` installs **process-wide, permanent** globals that are never removed: `window` (=
 `globalThis`, a plain data property), `navigator`, `matchMedia` (never matches), `requestAnimationFrame` /
-`cancelAnimationFrame` / `requestIdleCallback` (queued into the running render, dropped outside renders),
+`cancelAnimationFrame` / `requestIdleCallback` (queued into the render whose code requested them, found by its
+`AsyncLocalStorage` render scope; dropped outside renders and when that render already ended),
 `getComputedStyle`, `CSS`, no-op `addEventListener` / `removeEventListener` / `dispatchEvent` on the global,
 `innerWidth` & co., `screen`, `scrollTo` / `scrollBy` and the element / event classes. Libraries that sniff
 `typeof window` take their browser branch afterwards: import them before `installSpectrumSsr()` or keep them in a
@@ -43,17 +58,23 @@ export interface RenderSpectrumOptions {
   lifecycle?: LifecycleMode;         // lifecycle of managed classes; default 'full'
   lifecycleByTag?: Record<string, LifecycleMode>;  // per-tag override (also opts non-managed classes in),
                                                    // e.g. {'sp-overlay': 'none', 'my-element': 'full'}
-  elementRenderers?: ElementRendererConstructor[]; // extra renderers tried BEFORE the Spectrum ones
+  elementRenderers?: ElementRendererConstructor[]; // extra renderers tried BEFORE the Spectrum ones (one whose
+                                     // renderShadow() returns undefined must pop renderInfo.customElementHostStack
+                                     // itself: @lit-labs/ssr 4.1.0 pops it only after an emitted shadow; swc-ssr's
+                                     // own fallback renderer for non-Lit custom elements does)
   isManagedClass?: (ctor: CustomElementConstructor, tagName: string) => boolean;
                                      // which classes get `lifecycle` by default; default: Spectrum classes
                                      // (SpectrumMixin / SpectrumElement in the prototype chain)
   timeoutMs?: number;                // deadline of one render; default 10000, 0 / Infinity disables it
-  lazyDefinitionWaitMs?: number;     // wait for lazily imported definitions; default 250, 0 disables it
+                                     // (values >= 2^31 ms, beyond the longest timer delay, count as Infinity)
+  lazyDefinitionWaitMs?: number;     // wait for lazily imported definitions; default 250, 0 disables it;
+                                     // Infinity (or >= 2^31 ms): wait until defined, bounded by timeoutMs
   lang?: string;                     // document language during the render (document.documentElement.lang,
-                                     // restored afterwards); components resolve their locale from it
+                                     // restored afterwards); components resolve their locale from it. Without
+                                     // it, a whole-document template's own <html lang> is used from pass 2 on
   deterministicIds?: boolean;        // default true: randomID() ids are deterministic per render; false: this
                                      // render's randomID() calls use the CSPRNG too (process-wide switch:
-                                     // configureRandomSource from swc-ssr/dom-shim)
+                                     // configureRandomSource from swc-ssr/dom-shim; see the caveat above)
 }
 
 export interface ElementReport {
@@ -66,8 +87,9 @@ export interface ElementReport {
 
 export interface RenderReport {
   elements: ElementReport[];
-  passes: number;         // 2 normally; 3 when elements without tree information failed in pass 2, or a `full`
-                          // element was updated after its markup was emitted (at most 3)
+  passes: number;         // 2 normally; 3 when elements without tree information failed in pass 2, a `full`
+                          // element was updated after its markup was emitted, or an element adopted the
+                          // previous-pass instance of another element (`adopted candidate rejected`) (at most 3)
   durationMs: number;     // includes the event-loop turn at the end of the render (see below)
 }
 
@@ -119,7 +141,9 @@ The effective lifecycle of an element, in order of precedence:
    shadow facades in every mode.
 
 Pass 1 never goes beyond `'connected'`. `LitElementRenderer.renderOptions` are honoured for every element, pre-built
-ones included, and evaluated after the element's attributes and properties are set (as upstream does). With
+ones included, and evaluated after the element's attributes and properties are set (as upstream does), once per
+element and pass, before anything connects it: pre-built elements when they are created (the renderer that adopts
+one reuses that decision; it does not ask again after the document lifecycle updated the element). With
 `disableSsr` the element is not pooled, connected or updated; it renders without a shadow root (upstream's output)
 with its light DOM, and other elements see a plain facade of it.
 
@@ -143,18 +167,31 @@ in browsers. Writes made by the renderer (upstream `ElementRenderer.setAttribute
   `disconnectedCallback` (like a browser removing the tree), the pass contexts are disposed, and the render waits one
   event-loop turn (`setTimeout 0`) with its session still active before the report is built, so zero-delay timers and
   late promise continuations of component code run attributed to this render.
-* `unhandledRejection`: a listener is installed with the first render and kept for the life of the process. It only
-  attributes rejections of promises created inside a render's scope; late ones after the render ended are only logged
-  in debug mode. Other rejections get Node's behaviour for the `--unhandled-rejections` mode (throw by default), or are
-  left to the application when it has its own listener (which also sees render-created rejections: Node emits to
-  every listener).
+* Work a render leaves behind belongs to that render, never to another one: animation frames, `document` listeners,
+  unsupported-selector logs and dropped DOM changes are filed under the render of the caller's `AsyncLocalStorage`
+  render scope (also in timers and promise continuations the render started). Once that render ended, its frames
+  are dropped and the `document` listeners it adds are removed at once. Only code without a render scope goes to the
+  most recent active render.
+* `unhandledRejection`: a listener is installed with the first render and kept for the life of the process. While a
+  render is in progress it attributes rejections of promises created inside the render's scope (to the element
+  whose hook created them, else `#render`). After the render ended: rejections from its own scope (templates,
+  directives, custom renderers, and long-lived resources first created there, e.g. a lazily created client or an
+  interval) get Node's behaviour; rejections from an element's hooks (component code of the discarded tree) become a
+  process warning (`SWC_SSR_LATE_REJECTION`) instead of a crash. Other rejections get Node's behaviour for the
+  `--unhandled-rejections` mode (throw by default). An application with its own listener decides itself (it also sees
+  render-created rejections: Node emits to every listener), and no warning is emitted then.
 
 ### Report semantics
 
 The pass-2 pool is keyed structurally: tree scope + tag + a short hash of the template's static attributes +
 ordinal. Adoption of a previous-pass instance is refused when its static attributes differ; attributes the previous
 pass's element got from upstream that are not set again are removed (with `attributeChangedCallback`) before the
-lifecycle runs. The sequential `id` is the `data-swc-ssr` value and the report id. Elements pre-built from the
+lifecycle runs. The key is all upstream gives a renderer when it constructs it (the element's light DOM is rendered
+later), so adoptions are verified after the pass, against the pass's own output: an element whose light DOM (child
+tags, `slot` names, text) differs from that of the element it adopted, while another element of the same tag,
+static attributes and scope has exactly that light DOM, adopted the wrong instance; it is reported and another pass
+is made, whose ordinals follow the new order. Elements that are the same element with changed content are not
+affected. The sequential `id` is the `data-swc-ssr` value and the report id. Elements pre-built from the
 previous pass but not rendered, or only present in earlier passes, are reported with `id: -1` (only when they have
 messages). Messages of earlier passes are prefixed `pass N: `.
 
@@ -162,17 +199,20 @@ Messages that can appear:
 
 | Message | Where | Meaning |
 |---|---|---|
-| `unhandled rejection: ...` | the element whose hook created the promise, else `#render` | a rejection nobody handled, of a promise created inside the render's scope (never an unrelated one) |
+| `unhandled rejection: ...` | the element whose hook created the promise, else `#render` | a rejection nobody handled, of a promise created inside the render's scope (never an unrelated one), arriving while the render is in progress (later ones: see `unhandledRejection` above) |
 | `disconnectedCallback: ...` | element | its `disconnectedCallback` threw at the end of the render |
 | `updated after its markup was emitted in pass N (changed: a, b); another pass is made` | element | a `full` element was updated after its markup was emitted (last pass: `the output shows the earlier state`) |
 | `dropped DOM change: <op>(<node>) on <target> [in <host>] has no effect on the server output ...` | the element whose code made the change, else the closest rendered custom element, else `#render` | structure changes on rendered nodes (from pass 2 on), e.g. `sp-table` checkbox cells |
-| `light-DOM attribute change not applied: ...` | host or `#render` | an attribute change on a plain element could not be located in the final output |
+| `light-DOM attribute change not applied: ...` | host or `#render` | an attribute change on a plain element could not be located in the final output: no element with its signature (tag, `id`, `name`, `slot`, `type`, `role`, `part`, `for`, `href`, `src`, `class`), or several and not exactly one with its content (child tags, text) |
+| `adopted candidate rejected: light DOM differs from the pass-N <tag> it was matched with ...; another pass is made` | element | the element took over the previous-pass instance of another element of the same kind (see above); the next pass corrects it (last pass: `the output may show the state of that element`) |
 | `locale: no language is set ...` | element | its locale falls back to `navigator.language` (pass `lang`, or set `<sp-theme lang>`) |
 | `attributeChangedCallback(<name>): ...` | element | an attribute reaction threw |
 | `the render did not settle within N ms: pass K was abandoned, the output of pass K-1 is used` | `#render` | see `timeoutMs` |
 
 `ServerTree` (internal, `packages/swc-ssr/src/server/server-tree.ts`): parse5 (htmlparser2 adapter) document of the pass-1
-HTML with lookup `byId(id)`, `lightChildren(id)`, `shadowRoot(id)`, `query(node, selector)`, `queryAll(node, selector)` via `css-select`.
+HTML with lookup `byId(id)`, `lightChildren(id)`, `shadowRoot(id)`, `query(node, selector)`, `queryAll(node, selector)` via `css-select`,
+`documentLanguage()` (whole documents: the `<html lang>`), and `lightSignature(node)` (child tags with `slot`, text hash;
+used to verify adoptions and to locate light-DOM attribute changes).
 
 ## `swc-ssr/client`  (`packages/swc-ssr/src/client/index.ts`)
 
@@ -221,7 +261,8 @@ declarative shadow root and without `defer-hydration` (e.g. Angular component ho
 awaited. The agnostic path removes `defer-hydration` from every deferred candidate, not only `sp-*`.
 
 Besides the adapters (built in: `sp-picker`, `sp-slider`, `sp-breadcrumbs`, `sp-checkbox`, and a `MatchMediaController`
-adapter for `sp-picker` / `sp-action-menu` / `sp-contextual-help`), importing `swc-ssr/client` installs two generic
+adapter for every hydrating element that has `MatchMediaController`s - `sp-picker` / `sp-action-menu` /
+`sp-contextual-help`, subclasses registered under other tags, application components), importing `swc-ssr/client` installs two generic
 hooks on every Lit element whose pre-existing shadow root was rendered by `@lit-labs/ssr` (it contains a `<!--lit-part`
 marker) or whose tag starts with `sp-`: the initial `slotchange` (which declarative shadow roots never receive) is
 emulated like the server does, and a hydration mismatch is recovered from by re-rendering that element on the client
@@ -267,7 +308,8 @@ The exported entries' `load()` also registers `sp-theme` with the light/medium f
 | `GET /catalog.json` | `[{name, interactive, notes}]` |
 | `?agnostic=1` on an SSR route | hydrate without the template (framework-agnostic path) |
 | `?lang=<BCP 47 tag>` on SSR and CSR routes | page language; otherwise the request's most preferred `Accept-Language` language (`*` ignored, canonicalized with `Intl.getCanonicalLocales`), otherwise `en`. Passed to `renderSpectrum({lang})` and written to `<html lang>` |
-| `HEAD` on any path | 200 with an empty body, never renders; not in the request log (the first HEAD gets its own line, later ones a per-minute count) |
+| `HEAD` on any path except `/dist/*` | 200 with an empty body, never renders; not in the request log (the first HEAD gets its own line, later ones a per-minute count) |
+| `HEAD /dist/*` | like `GET` without the body (static handler): the file's `Content-Type` / `Content-Length`, 404 for a missing file |
 | `GET /dist/*` | static from `demo/public/dist` |
 
 The demo renders with `renderSpectrum(pageTemplate(entries), {deferHydration: true, lang})`.

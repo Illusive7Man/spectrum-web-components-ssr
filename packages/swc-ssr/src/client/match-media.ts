@@ -96,9 +96,12 @@ export function unpinMatches(controller: MatchMediaControllerLike, pinnedValue: 
 
 /**
  * Pins every `MatchMediaController` of `element` to the server's value (the `beforeHydrate` step of the adapters).
+ * Returns the number of controllers found (0: the element has none, nothing was changed).
  */
-export function pinElementMedia(element: object): void {
-  for (const controller of findMatchMediaControllers(element)) pinMatches(controller);
+export function pinElementMedia(element: object): number {
+  const controllers = findMatchMediaControllers(element);
+  for (const controller of controllers) pinMatches(controller);
+  return controllers.length;
 }
 
 /**

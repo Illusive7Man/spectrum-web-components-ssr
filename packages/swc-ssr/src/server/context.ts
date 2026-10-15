@@ -19,6 +19,7 @@ import {
   setRandomSource,
   setListenerLog,
   type DroppedMutationHandler,
+  type ListenerLog,
   type ListenerRecord,
   type RafEntry,
   type RafSink,
@@ -42,6 +43,8 @@ export interface ElementRecord {
   properties: Map<string, unknown>;
   /** Canonical form of the template's static attributes of the element (see `plan.ts`). */
   staticAttributes: string;
+  /** Pass >= 2: id of the previous pass's record the element was matched with (by key), if any. */
+  adoptedFrom?: number;
 }
 
 /** A tiny deterministic PRNG (mulberry32). */
@@ -61,6 +64,18 @@ export function createRandom(seed: number): (array: Uint8Array) => void {
   };
 }
 
+/** The longest delay `setTimeout` accepts (2^31 - 1 ms). */
+export const MAX_TIMER_DELAY = 2 ** 31 - 1;
+
+/**
+ * The `setTimeout` delay for a positive wait of `ms` milliseconds, or undefined for "no timer" (`Infinity` and
+ * everything above `MAX_TIMER_DELAY`). Review finding (fixed): Node turns longer delays into 1 ms (with a
+ * `TimeoutOverflowWarning`), so `timeoutMs: 2 ** 31` made every render time out at once.
+ */
+export function timerDelay(ms: number): number | undefined {
+  return ms > MAX_TIMER_DELAY ? undefined : Math.max(ms, 1);
+}
+
 /** FNV-1a hash of a string (used to seed pass 2 from the pass-1 HTML). */
 export function hashString(text: string): number {
   let hash = 0x811c9dc5;
@@ -71,10 +86,15 @@ export function hashString(text: string): number {
   return hash >>> 0;
 }
 
-export class RafQueue implements RafSink {
-  entries: RafEntry[] = [];
+/** A queued animation frame and the render scope of the code that requested it (the callback runs in it). */
+export interface ScopedRafEntry extends RafEntry {
+  scope?: RenderScope;
+}
 
-  push(entry: RafEntry): void {
+export class RafQueue implements RafSink {
+  entries: ScopedRafEntry[] = [];
+
+  push(entry: ScopedRafEntry): void {
     this.entries.push(entry);
   }
 
@@ -129,14 +149,14 @@ export class RenderSession {
   ended = false;
   /** Set when the render's deadline passed: the remaining work stops at its next step. */
   aborted = false;
-  /** Logs selectors the shim could not evaluate (installed while the session is the most recent active one). */
+  /**
+   * The `lang` of the template's own `<html>` element (whole-document templates, read from the pass-1 tree; see
+   * `setDocumentLanguage`). Used as the document language from pass 2 on when `options.lang` is not set.
+   */
+  documentLang: string | undefined;
+  /** Logs selectors the shim could not evaluate (code of this render, see `dispatchSelectorError`). */
   readonly selectorErrorHandler: SelectorErrorHandler = (selector, error) => {
     this.debug(`unsupported selector "${selector}": ${errorMessage(error)}`);
-  };
-  /** Reports structure changes the server cannot render (installed while the session is the most recent active one). */
-  readonly droppedMutationHandler: DroppedMutationHandler = (target, operation, node) => {
-    // The render whose code made the change (nested renders: not necessarily the most recent one).
-    reportDroppedMutation(renderScope.getStore()?.session ?? this, target, operation, node);
   };
 
   constructor(options: RenderSpectrumOptions) {
@@ -377,26 +397,27 @@ export function getCurrentRenderContext(): RenderContext | undefined {
 /**
  * Runs `fn` synchronously with `context` as the current context and its deterministic random source active, then
  * restores whatever was active before (so nested renders are safe).
+ *
+ * Frames, document listeners and the other per-render hooks of code running in `fn` belong to the context's render
+ * because they are filed by render scope (see "Session activation" below), even while another render is the most
+ * recent active session (nested / overlapping renders). `fn` normally runs in that scope already; when it does not
+ * (no scope, or another render's), it is run in the render's scope.
  */
 export function runInContext<T>(context: RenderContext, fn: () => T): T {
-  const previousContext = currentContext;
   const {session} = context;
+  if (renderScope.getStore()?.session !== session) {
+    return renderScope.run({session}, () => runInContext(context, fn));
+  }
+  const previousContext = currentContext;
   // RenderSpectrumOptions.deterministicIds (review M8): `false` leaves the CSPRNG in place for this render only (the
   // process-wide default is `configureRandomSource` in dom-shim/install.ts).
   const previousRandom = setRandomSource(context.options.deterministicIds === false ? undefined : context.random);
-  // Frames and document listeners of this code belong to this render, even while another render is the most
-  // recent active session (nested / overlapping renders) - unless the render is over (then they are dropped / not
-  // logged, so nothing accumulates in a finished session).
-  const previousRaf = setRafSink(session.ended ? undefined : session.raf);
-  const previousLog = setListenerLog(session.ended ? undefined : session.listeners);
   currentContext = context;
   try {
     return fn();
   } finally {
     currentContext = previousContext;
     setRandomSource(previousRandom);
-    setRafSink(previousRaf);
-    setListenerLog(previousLog);
   }
 }
 
@@ -420,6 +441,11 @@ export function runInRenderScope<T>(session: RenderSession, fn: () => T): T {
 /** The render scope of the code running now (also in async continuations and timers started by a render). */
 export function getRenderScope(): RenderScope | undefined {
   return renderScope.getStore();
+}
+
+/** Runs `fn` in `scope` (e.g. an animation frame callback in the scope of the code that requested the frame). */
+export function runInScope<T>(scope: RenderScope | undefined, fn: () => T): T {
+  return scope === undefined || renderScope.getStore() === scope ? fn() : renderScope.run(scope, fn);
 }
 
 /**
@@ -490,11 +516,35 @@ function forwardUnhandledRejection(reason: unknown): void {
 }
 
 /**
+ * A late rejection of a finished render's element hook (see `onUnhandledRejection`): not fatal, but visible - a
+ * process warning, unless the application has its own listener (it sees the rejection and decides) or Node's mode
+ * is `none`.
+ */
+function warnLateRejection(reason: unknown, tagName: string): void {
+  if (process.listenerCount('unhandledRejection') > 1 || unhandledRejectionsMode() === 'none') {
+    return;
+  }
+  process.emitWarning(
+    `unhandled rejection in <${tagName}> after its render ended (the element was discarded with the render): ${errorMessage(reason)}`,
+    {type: 'SwcSsrLateRejectionWarning', code: 'SWC_SSR_LATE_REJECTION'}
+  );
+}
+
+/**
  * Rejections nobody handled. Only those of promises created by a render (its `AsyncLocalStorage` scope; Node runs
- * this listener in the async context of the rejected promise) are attributed to it: to the element whose hook
- * created the promise, or to the render (`#render`). A render's component code keeps running after the render in
- * some cases (timers, promise chains of discarded instances); its late rejections are only logged in debug mode.
- * Every other rejection gets Node's behaviour (see `forwardUnhandledRejection`).
+ * this listener in the async context of the rejected promise) are attributed to it while it is in progress: to the
+ * element whose hook created the promise, or to the render (`#render`). Every other rejection gets Node's behaviour
+ * (see `forwardUnhandledRejection`).
+ *
+ * After the render ended its scope lives on in whatever it started: timers, promise chains, and also long-lived
+ * resources that were first created inside the render (a lazily created client, an interval, a pool). Review
+ * finding (fixed): such rejections used to be debug-logged only, i.e. swallowed for the life of the process. Now:
+ *  - from the render's own scope (no element: templates, directives, custom renderers, application code they
+ *    started): Node's behaviour, as if swc-ssr had no listener;
+ *  - from an element's hooks (component code of the discarded tree, e.g. a disabled `sp-slider`'s
+ *    `handleDisabledChanged()` continuing after the render): a process warning (`SWC_SSR_LATE_REJECTION`) instead
+ *    of a crash, unless the application has its own listener. Spectrum components leave such work behind (see the
+ *    README, "Late work after a render"); crashing a server for it would make every render a risk.
  *
  * Review M2 (fixed): the listener used to turn every rejection of the process into a report warning while any
  * render was in progress (renders span macrotasks, so unrelated rejections of other requests were swallowed).
@@ -508,7 +558,12 @@ function onUnhandledRejection(reason: unknown): void {
   const {session, report} = scope;
   const message = `unhandled rejection: ${errorMessage(reason)}`;
   if (session.ended) {
-    session.debug(`after the render: ${message}`);
+    session.debug(`after the render: ${message}${report ? ` (<${report.tagName}>)` : ''}`);
+    if (report) {
+      warnLateRejection(reason, report.tagName);
+    } else {
+      forwardUnhandledRejection(reason);
+    }
     return;
   }
   if (report) {
@@ -592,15 +647,14 @@ function reportDroppedMutation(session: RenderSession, target: any, operation: s
  * finished before a nested one, the nested render's deactivation re-installed the hooks of the outer, already
  * finished session; from then on the animation frames and document listeners of every later async continuation
  * were queued into that dead session (never flushed, never removed), retaining its render graph and growing without
- * bound. Now a deactivating session is removed from this set and the hooks are re-pointed at the most recent
- * session that is still active (or at what was installed before any session was active).
+ * bound. Now a deactivating session is removed from this set, and the hooks dispatch by render scope (below).
  */
 const activeSessions = new Set<RenderSession>();
 /** The hooks that were in place before the first of the currently active sessions was activated. */
 let baseHooks:
   | {
       raf: RafSink | undefined;
-      log: ListenerRecord[] | undefined;
+      log: ListenerLog | undefined;
       selector: SelectorErrorHandler | undefined;
       dropped: DroppedMutationHandler | undefined;
       lang: string | null;
@@ -614,6 +668,89 @@ function latestActiveSession(): RenderSession | undefined {
     latest = session;
   }
   return latest;
+}
+
+/*
+ * The process-wide hooks (dom-shim/hooks.ts, dom-shim/select.ts) are installed once while any session is active and
+ * file every call under the render whose code made it: the session of the caller's render scope
+ * (`AsyncLocalStorage`, also in timers and promise continuations a render started); only callers without a render
+ * scope (code unrelated to any render) go to the most recent active session.
+ *
+ * Review finding (fixed): the hooks used to point at the most recent active session. A late continuation of a
+ * finished render (a timer one of its components started) that requested an animation frame while the next queued
+ * render ran had its frame flushed inside that render, with its error attributed to an element of that render (and
+ * its document listeners were removed with that render). Now the work of a finished render cannot reach another
+ * render: its frames are dropped (nothing will ever flush them), the document listeners it adds are removed at once
+ * (its render already removed its listeners from the process-wide document; nothing else would), and its
+ * unsupported selectors are logged by its own session.
+ */
+
+/** The session the code running now belongs to (see above), and its render scope; undefined outside of renders. */
+function callerSession(): {session: RenderSession | undefined; scope: RenderScope | undefined} {
+  const scope = renderScope.getStore();
+  return scope ? {session: scope.session, scope} : {session: latestActiveSession(), scope: undefined};
+}
+
+const rafDispatcher: RafSink = {
+  push(entry: RafEntry): void {
+    const {session, scope} = callerSession();
+    if (!session) {
+      baseHooks?.raf?.push(entry);
+    } else if (session.ended) {
+      session.debug('requestAnimationFrame after the render ended: the frame is dropped');
+    } else {
+      // The callback runs in the requesting code's render scope (rejections it causes are attributed to its element).
+      session.raf.push(scope ? {...entry, scope} : entry);
+    }
+  },
+  cancel(id: number): void {
+    // Frame ids are unique in the process.
+    for (const session of activeSessions) {
+      session.raf.cancel(id);
+    }
+    baseHooks?.raf?.cancel(id);
+  },
+};
+
+const listenerDispatcher: ListenerLog = {
+  push(record: ListenerRecord): void {
+    const {session} = callerSession();
+    if (!session) {
+      baseHooks?.log?.push(record);
+    } else if (session.ended) {
+      session.debug(`document listener "${record[1]}" added after the render ended: removed`);
+      removeListener(record);
+    } else {
+      session.listeners.push(record);
+    }
+  },
+};
+
+const dispatchSelectorError: SelectorErrorHandler = (selector, error) => {
+  const {session} = callerSession();
+  if (session) {
+    session.selectorErrorHandler(selector, error);
+  } else {
+    baseHooks?.selector?.(selector, error);
+  }
+};
+
+/** Reports structure changes the server cannot render to the render whose code made them. */
+const dispatchDroppedMutation: DroppedMutationHandler = (target, operation, node) => {
+  const {session} = callerSession();
+  if (session) {
+    reportDroppedMutation(session, target, operation, node);
+  } else {
+    baseHooks?.dropped?.(target, operation, node);
+  }
+};
+
+function removeListener([target, type, listener, options]: ListenerRecord): void {
+  try {
+    target.removeEventListener(type, listener as EventListener, options as EventListenerOptions);
+  } catch {
+    // ignore
+  }
 }
 
 function documentElement(): any {
@@ -638,16 +775,37 @@ function writeDocumentLang(lang: string | null): void {
   }
 }
 
-/** Points the process-wide hooks at `session` (or restores the hooks found before any session was active). */
+/**
+ * The document language while `session` is the most recent active one: `RenderSpectrumOptions.lang` (review M7);
+ * else, for whole-document templates, the template's own `<html lang>` from pass 2 on (`setDocumentLanguage`); else
+ * what the document had before. Components resolve their locale from it (directly,
+ * `reactive-controllers/src/LanguageResolution.js`, or through `theme/src/Theme.js`'s fallback).
+ */
+function sessionLang(session: RenderSession): string | null {
+  return session.options.lang ?? session.documentLang ?? baseHooks?.lang ?? null;
+}
+
+/**
+ * Whole-document templates (review finding, fixed): `<html lang="de">` in a template is markup, not the server
+ * document's language, so such a page used to render with `navigator.language` unless `lang` was passed too. The
+ * renderer reads the `lang` of the template's `<html>` from the pass-1 tree and sets it here before pass 2; it
+ * applies when `options.lang` is not set.
+ */
+export function setDocumentLanguage(session: RenderSession, lang: string | undefined): void {
+  session.documentLang = lang || undefined;
+  if (!session.ended && latestActiveSession() === session) {
+    writeDocumentLang(sessionLang(session));
+  }
+}
+
+/** Installs the dispatching hooks while sessions are active (or restores the hooks found before any was active). */
 function installHooks(session: RenderSession | undefined): void {
   if (session) {
-    setRafSink(session.raf);
-    setListenerLog(session.listeners);
-    setSelectorErrorHandler(session.selectorErrorHandler);
-    setDroppedMutationHandler(session.droppedMutationHandler);
-    // RenderSpectrumOptions.lang (review M7): the document language components resolve their locale from (directly,
-    // `reactive-controllers/src/LanguageResolution.js`, or through `theme/src/Theme.js`'s fallback).
-    writeDocumentLang(session.options.lang ?? baseHooks?.lang ?? null);
+    setRafSink(rafDispatcher);
+    setListenerLog(listenerDispatcher);
+    setSelectorErrorHandler(dispatchSelectorError);
+    setDroppedMutationHandler(dispatchDroppedMutation);
+    writeDocumentLang(sessionLang(session));
   } else {
     setRafSink(baseHooks?.raf);
     setListenerLog(baseHooks?.log);
@@ -660,9 +818,9 @@ function installHooks(session: RenderSession | undefined): void {
 
 /**
  * Activates process-wide hooks for a session: the rAF sink (components queue frames from async continuations
- * too), the listener log for `document` listeners, an unsupported-selector logger, the dropped-mutation reporter,
- * the document language, and (once per process) the `unhandledRejection` listener. Returns the deactivation
- * function (idempotent).
+ * too), the listener log for `document` listeners, an unsupported-selector logger, the dropped-mutation reporter
+ * (all four dispatch by render scope, see above), the document language, and (once per process) the
+ * `unhandledRejection` listener. Returns the deactivation function (idempotent).
  */
 export function activateSession(session: RenderSession): () => void {
   if (activeSessions.size === 0) {
@@ -690,12 +848,8 @@ export function activateSession(session: RenderSession): () => void {
     session.raf.entries.length = 0;
     session.current = undefined;
     // Remove listeners components added to process-wide singletons during the render.
-    for (const [target, type, listener, options] of session.listeners.splice(0)) {
-      try {
-        target.removeEventListener(type, listener as EventListener, options as EventListenerOptions);
-      } catch {
-        // ignore
-      }
+    for (const record of session.listeners.splice(0)) {
+      removeListener(record);
     }
     session.connected.length = 0;
   };

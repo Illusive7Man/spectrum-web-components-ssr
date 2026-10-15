@@ -19,7 +19,14 @@
 import {collectSlotchangeBindings, findBoundSlot} from '../shared/slot-bindings.js';
 import {LitElement, ReactiveElement, type PropertyValues} from 'lit';
 import {_$LE} from 'lit-element/private-ssr-support.js';
-import {runInContext, errorMessage, withElementScope, type RenderContext, type RenderSession} from './context.js';
+import {
+  runInContext,
+  runInScope,
+  errorMessage,
+  withElementScope,
+  type RenderContext,
+  type RenderSession,
+} from './context.js';
 import type {ElementReport} from './types.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -562,16 +569,20 @@ export async function drainMicrotasks(ticks = MICROTASK_TICKS): Promise<void> {
   }
 }
 
-/** Runs the callbacks of one animation frame (those queued before the frame started). */
+/**
+ * Runs the callbacks of one animation frame (those queued before the frame started), each in the render scope of
+ * the code that requested it (`ScopedRafEntry`): promises a callback creates belong to that element. Errors go to
+ * that element's report, else to the element whose lifecycle ran last.
+ */
 export function flushFrame(context: RenderContext): void {
   const session = context.session;
   const entries = session.raf.entries.splice(0);
   const time = ++session.frame * 16;
-  for (const {callback} of entries) {
+  for (const {callback, scope} of entries) {
     try {
-      callback(time);
+      runInScope(scope, () => callback(time));
     } catch (error) {
-      const target = session.lastReport;
+      const target = scope?.report ?? session.lastReport;
       if (target) {
         record(target, 'requestAnimationFrame callback', error);
       } else {

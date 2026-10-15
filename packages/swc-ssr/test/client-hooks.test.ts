@@ -165,3 +165,28 @@ test('M9: sp-picker hydrates with the server value of isMobile, then gets the ph
   assert.deepEqual(picker.updates, [[picker.isMobile.key, false]]);
   assert.equal(Object.getOwnPropertyDescriptor(picker.isMobile, 'matches')?.value, true);
 });
+
+test('M9: a MatchMediaController element under another tag (a subclass) is pinned too', () => {
+  // Review finding: the adapter matched only sp-picker / sp-action-menu / sp-contextual-help, so e.g.
+  // `class MyPicker extends Picker` registered as <my-picker> hydrated with the phone's value (a mismatch).
+  const picker = new FakeLitElement('my-picker', marker()) as FakeLitElement & {isMobile: any; seen: boolean[]};
+  picker.isMobile = {host: picker, matches: true, media: {matches: true}, key: Symbol('match-media-key')};
+  picker.seen = [];
+  const render = picker.render.bind(picker);
+  picker.render = () => {
+    picker.seen.push(picker.isMobile.matches);
+    return render();
+  };
+  hydrate(picker);
+  assert.deepEqual(picker.seen, [false, false], 'pinned to the server value for the hydrating render');
+  assert.deepEqual(picker.updates, [[picker.isMobile.key, false]], 'restored afterwards with requestUpdate');
+  assert.equal(Object.getOwnPropertyDescriptor(picker.isMobile, 'matches')?.value, true);
+});
+
+test('M9: elements without MatchMediaControllers are not touched by the adapter', () => {
+  const element = new FakeLitElement('x-no-media', marker()) as FakeLitElement & {other: any};
+  element.other = {matches: true, media: {matches: true}, host: {}}; // a controller of another host
+  hydrate(element);
+  assert.deepEqual(element.updates, [], 'no update requested');
+  assert.equal(Object.getOwnPropertyDescriptor(element.other, 'matches')?.value, true, 'not pinned');
+});

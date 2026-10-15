@@ -891,12 +891,14 @@ function installDocumentExtras(g: any): void {
     Object.defineProperty(doc, name, {value: fn, configurable: true, writable: true});
   }
 
-  // Listeners added to the document singleton during a render are logged so the renderer can remove them.
+  // Listeners added to the document singleton during a render are logged so the renderer can remove them. Logged
+  // after they were added: the renderer removes a listener at once when the render it belongs to is already over.
   if (!(doc.addEventListener as AnyNode)?.[OURS]) {
     const add = doc.addEventListener;
     const logged = function (this: AnyNode, type: string, listener: unknown, options?: unknown) {
+      const result = add.call(this, type, listener, options);
       logListener([doc, type, listener, options]);
-      return add.call(this, type, listener, options);
+      return result;
     };
     (logged as AnyNode)[OURS] = true;
     Object.defineProperty(doc, 'addEventListener', {value: logged, configurable: true, writable: true});
@@ -941,6 +943,12 @@ const RANDOM_ID_BYTES = 4;
  * `getRandomValues` caller in Spectrum): `crypto.getRandomValues(new Uint8Array(4))` - a plain `Uint8Array` (not a
  * subclass such as `Buffer`) of exactly 4 bytes, used for DOM ids (`${prefix}-${8 hex digits}`). Everything else -
  * nonces, tokens, UUID material, keys, which are longer and/or of other array types - must stay unpredictable.
+ *
+ * Caveat (documented in docs/API.md, "Deterministic ids, caveat"): the shape is all the wrapper sees, so ANY plain
+ * 4-byte request made synchronously during a render - also by application code in a template, directive or custom
+ * renderer - gets the render's deterministic bytes. Turn it off per render (`deterministicIds: false`) or for the
+ * process (`configureRandomSource({deterministicIds: false})`). Restricting it to `randomID()` itself would take a
+ * stack inspection per request, which breaks as soon as the server is bundled (file names / frames change).
  */
 export function isRandomIdRequest(array: unknown): array is Uint8Array {
   return (

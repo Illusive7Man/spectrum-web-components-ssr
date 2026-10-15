@@ -25,7 +25,7 @@ import {errorMessage, withElementScope, type ElementRecord, type RenderContext} 
 import type {ElementReport, LifecycleMode} from './types.js';
 import {connectElement, hasCommittedRender, markManaged, unmarkManaged, withoutAttributeReactions} from './lifecycle.js';
 import {findAdapter} from './adapters/registry.js';
-import {resolveRenderOptions} from './render-options.js';
+import {resolveRenderOptions, type ElementRenderOptions} from './render-options.js';
 import type {LightMutations} from './light-mutations.js';
 import {
   MARKER_ATTRIBUTE,
@@ -135,6 +135,8 @@ export class TreeRealm {
   private readonly ssrDisabled = new Set<TreeElementNode>();
   /** Effective lifecycle of each pooled instance (class, adapter, options and its `renderOptions`). */
   private readonly modes = new WeakMap<HTMLElement, LifecycleMode>();
+  /** The `LitElementRenderer.renderOptions` decision made for each pooled instance (see `renderOptionsOf`). */
+  private readonly renderOptions = new WeakMap<HTMLElement, ElementRenderOptions | undefined>();
   /** Attribute changes made on plain elements during this pass (see light-mutations.ts). */
   readonly lightMutations: LightMutations = new Map();
   /** Set when the render is over: no further instances are created (see `dispose`). */
@@ -519,7 +521,8 @@ export class TreeRealm {
     this.constructing.add(node);
     let element: HTMLElement;
     try {
-      element = constructElement(ctor);
+      // In the element's scope: promises its constructor creates belong to it (see context.ts onUnhandledRejection).
+      element = withElementScope(report, () => constructElement(ctor));
     } catch (error) {
       report.errors.push(`constructor: ${errorMessage(error)}`);
       this.failed.add(node);
@@ -590,7 +593,19 @@ export class TreeRealm {
       unmarkManaged(element);
     }
     this.modes.set(element, mode);
+    this.renderOptions.set(element, renderOptions);
     return element;
+  }
+
+  /**
+   * The render options decided for a pooled instance when it was created (`found: false` for other elements).
+   * Review finding (fixed): the renderer used to evaluate them again when it adopted the instance - after the
+   * document lifecycle had connected and updated it - so a callback that depends on an attribute the element
+   * reflects in its first update could flip to `disableSsr` for an element that was already connected and updated.
+   * Upstream evaluates them once per element, before it connects it; so does swc-ssr now.
+   */
+  renderOptionsOf(element: HTMLElement): {found: boolean; options: ElementRenderOptions | undefined} {
+    return {found: this.renderOptions.has(element), options: this.renderOptions.get(element)};
   }
 
   /** Gives an instance its tree backing, shadow root facade and event-path links. */

@@ -29,7 +29,7 @@ export {
   requestFrame,
   cancelFrame,
 } from './hooks.js';
-export type {StructureBacking, RafEntry, RafSink, ListenerRecord} from './hooks.js';
+export type {StructureBacking, RafEntry, RafSink, ListenerRecord, ListenerLog} from './hooks.js';
 export {
   ServerElement,
   ServerText,

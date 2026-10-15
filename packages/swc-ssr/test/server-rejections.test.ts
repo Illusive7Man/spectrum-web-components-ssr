@@ -58,3 +58,18 @@ test('a late rejection of a finished render does not crash the server', () => {
   assert.equal(status, 0, stderr);
   assert.ok(result, `no result line:\n${stderr}`);
 });
+
+test("a late rejection of a finished render's element hook is not swallowed: a process warning names it", () => {
+  const {status, stderr} = run('late');
+  assert.equal(status, 0, stderr);
+  assert.match(stderr, /SWC_SSR_LATE_REJECTION/);
+  assert.match(stderr, /<x-rejecting> after its render ended[\s\S]*late rejection/);
+});
+
+test("a resource created inside a render (not by an element hook) gets Node's default after the render", () => {
+  // Review finding: such rejections used to be debug-logged only (swallowed for the life of the process).
+  const {status, stderr, result} = run('late-root');
+  assert.notEqual(status, 0, `the process must fail as it would without swc-ssr:\n${stderr}`);
+  assert.equal(result, undefined, 'the process failed before the fixture finished');
+  assert.match(stderr, /rejection of a resource created during a render/);
+});

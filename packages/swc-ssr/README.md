@@ -24,7 +24,10 @@ npm install @spectrum-web-components/bundle
 ```
 
 `lit`, `lit-html`, `lit-element` and the three `@lit-labs` packages are peer dependencies: your application and this
-package must share one copy of each (a second copy of `lit-html` breaks hydration). `@spectrum-web-components/base` is an
+package must share one copy of each (a second copy of `lit-html` breaks hydration). `@lit-labs/ssr` is pinned to
+`~4.1.0` (4.1.x patch releases): the renderers rely on internals of 4.1.0 - the marker of an element binding passed to
+renderers as a static attribute, the way `customElementHostStack` is pushed and popped around `renderShadow()`, and
+`lib/render.js` `renderThunked` - which a minor release may change. `@spectrum-web-components/base` is an
 optional peer; the adapters were written and tested against 1.12.4, other versions are untested. Requires Node 20 or
 newer (developed and tested on Node 22) and, for types, a TypeScript `moduleResolution` of `node16`, `nodenext` or
 `bundler` (the package uses an `exports` map).
@@ -69,14 +72,14 @@ element registry are process-wide.
 | Option | Default | Meaning |
 |---|---|---|
 | `deferHydration` | `false` | forwarded to `@lit-labs/ssr`: adds `defer-hydration` so nothing hydrates before the client says so. Use `true` with `hydrateSpectrum()`. |
-| `lang` | none | the page's `<html lang>` during the render, restored afterwards. Components format numbers and pick labels from it. Without it the server resolves `navigator.language` (`en-US`) and the report warns `locale: no language is set`. Pass the same language you write to `<html lang>`. |
+| `lang` | none | the page's `<html lang>` during the render, restored afterwards. Components format numbers and pick labels from it. Without it, a whole-document template uses its own `<html lang>`; otherwise the server resolves `navigator.language` (`en-US`) and the report warns `locale: no language is set`. Pass the same language you write to `<html lang>`. |
 | `lifecycle` | `'full'` | lifecycle of Spectrum elements: `'none'` (Lit default), `'connected'`, or `'full'` (also `firstUpdated`/`updated`, the rAF queue and a bounded re-render, so the markup shows the settled state). |
 | `lifecycleByTag` | none | per-tag override, also opts non-Spectrum Lit elements in: `{'sp-overlay': 'none', 'my-element': 'full'}`. |
 | `isManagedClass` | Spectrum classes | which classes get `lifecycle` by default. Other Lit elements keep upstream `@lit-labs/ssr` semantics. |
 | `elementRenderers` | none | extra `ElementRenderer`s tried before the Spectrum ones. |
-| `timeoutMs` | `10000` | deadline of one render; `0` or `Infinity` disables it. A render that does not settle returns its last completed pass plus a warning. |
-| `lazyDefinitionWaitMs` | `250` | how long to wait for definitions that components import lazily (`sp-slider` imports `sp-number-field` in `render()`). |
-| `deterministicIds` | `true` | Spectrum's `randomID()` ids are deterministic per render. `false` uses the CSPRNG for this render. |
+| `timeoutMs` | `10000` | deadline of one render; `0` or `Infinity` (or anything from 2^31 ms on) disables it. A render that does not settle returns its last completed pass plus a warning. |
+| `lazyDefinitionWaitMs` | `250` | how long to wait for definitions that components import lazily (`sp-slider` imports `sp-number-field` in `render()`); `0` disables the wait, `Infinity` waits until they are defined (within `timeoutMs`). |
+| `deterministicIds` | `true` | Spectrum's `randomID()` ids are deterministic per render. `false` uses the CSPRNG for this render. Note: every plain `Uint8Array(4)` `getRandomValues` request made synchronously during a render gets deterministic bytes (the shape of `randomID()`'s request), also from your own template code; never use such bytes for secrets there, or turn this off. |
 | `debug` | `false` | keep the `data-swc-ssr` markers and log details. |
 
 ### Adapters
@@ -130,7 +133,8 @@ Two ways to hydrate, chosen by the `template` option:
 
 `registerHydrationAdapter({tag, beforeHydrate, afterHydrate, slotchangePlan})` is the client twin of the server adapters:
 code around an element's first ("hydrating") update. Built in: `sp-picker`, `sp-slider`, `sp-breadcrumbs`, `sp-checkbox`
-and a `matchMedia` adapter for `sp-picker`, `sp-action-menu`, `sp-contextual-help`.
+and a `matchMedia` adapter for every hydrating element that has `MatchMediaController`s (`sp-picker`, `sp-action-menu`,
+`sp-contextual-help`, subclasses of them under other tags, your own components).
 
 Server output rendered with `deferHydration: true` hydrates its light-DOM elements in document order, which is the order a
 client-side render creates them in. Bundling: the e2e suite bundles the client with esbuild and the production conditions
@@ -194,8 +198,12 @@ so Spectrum elements in its output are plain elements without a shadow root. Thi
   them (scoping them to a render is not feasible). Renders are serialized in one queue.
 * **Late work after a render.** Some Spectrum code keeps running asynchronously (a disabled `sp-slider`'s
   `handleDisabledChanged()`, `sp-action-menu`'s `manageSelection()`). Rejections that arrive while the render runs become
-  report warnings; later ones are only logged in debug mode. A `node:test` runner with its own `unhandledRejection`
-  listener still sees them. The package installs one `unhandledRejection` listener with the first render.
+  report warnings. Later ones from component hooks print a `SWC_SSR_LATE_REJECTION` process warning (they do not crash
+  the server); later ones from anything else the render started - e.g. a client, interval or pool your code first
+  created during a render - get Node's normal behaviour (by default the process exits). An application with its own
+  `unhandledRejection` listener (or a `node:test` runner) sees all of them and decides itself. The package installs
+  one `unhandledRejection` listener with the first render. Animation frames and `document` listeners such late work
+  adds are dropped / removed: they never run inside another render.
 * **Layout-dependent state is approximated.** Tabs indicator, color handles and split-view sizes are computed without
   layout and corrected after hydration (`sp-tabs` 0.069 %, `sp-color-area` 0.174 %, `sp-split-view` 0.057 % changed
   pixels in the matrix).
@@ -207,10 +215,12 @@ so Spectrum elements in its output are plain elements without a shadow root. Thi
   runtime, so they appear only after hydration (1.4 % pixel change, reported as `dropped DOM change` warnings).
 * **Locale.** Pass `lang` (or set `<sp-theme lang>`); otherwise numbers format as `en-US`.
 * **Generated ids.** Module-level counters in Spectrum (`sp-dialog-label-N`) make the first and later renders of one
-  process differ slightly in a few ids.
+  process differ slightly in a few ids, and ids that components generate outside the synchronous parts of a render
+  (e.g. `sp-field-label` / `sp-dialog` label ids assigned from a slotchange handler) come from the CSPRNG, so they
+  differ between renders (the fidelity checks of the test suite normalize generated ids).
 * **Browsers.** The Playwright suite runs in Chromium only.
 * **Lit versions.** The package imports `lit-element/private-ssr-support.js` and `lit-html/private-ssr-support.js`; those are
-  private to Lit, so keep `lit` within the declared peer range.
+  private to Lit, so keep `lit` within the declared peer range. `@lit-labs/ssr` is pinned to 4.1.x (see Install).
 
 ## Building and publishing this package
 

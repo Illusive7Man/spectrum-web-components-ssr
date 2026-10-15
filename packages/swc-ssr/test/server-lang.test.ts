@@ -8,6 +8,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {installSpectrumSsr, renderSpectrum} from '../src/server/index.ts';
+import {parse} from 'parse5';
+import {adapter} from 'parse5-htmlparser2-tree-adapter';
 import {findElement, formatReport, parseHtml, shadowTemplateOf, templateContent} from './helpers.ts';
 
 installSpectrumSsr();
@@ -62,4 +64,33 @@ test('an element whose language falls back to navigator.language is reported', a
     field?.warnings.some((message) => message.startsWith('locale: no language is set')),
     formatReport(report)
   );
+});
+
+test('a whole-document template renders with its own <html lang> when no lang option is given', async () => {
+  // Review finding: `<html lang="de">` in the template is markup, not the server document's language; such pages
+  // rendered with navigator.language (en-US) unless `lang` was passed too.
+  assert.equal(documentLang(), null);
+  const {html: output, report} = await renderSpectrum(
+    html`<!doctype html><html lang="de"><head><title>t</title></head><body
+        ><sp-number-field label="Amount" value="1234.5"></sp-number-field
+      ></body></html>`
+  );
+  const field = findElement(parse(output, {treeAdapter: adapter}) as any, (element) => element.name === 'sp-number-field');
+  assert.ok(field);
+  const input = findElement(templateContent(shadowTemplateOf(field)!), (element) => element.name === 'input');
+  assert.equal(input?.attribs.value, '1.234,5', 'formatted for de');
+  assert.deepEqual(localeWarnings(report), [], formatReport(report));
+  assert.equal(documentLang(), null, 'restored after the render');
+});
+
+test('the lang option wins over the template <html lang>', async () => {
+  const {html: output} = await renderSpectrum(
+    html`<!doctype html><html lang="de"><head><title>t</title></head><body
+        ><sp-number-field label="Amount" value="1234.5"></sp-number-field
+      ></body></html>`,
+    {lang: 'en-US'}
+  );
+  const field = findElement(parse(output, {treeAdapter: adapter}) as any, (element) => element.name === 'sp-number-field');
+  const input = findElement(templateContent(shadowTemplateOf(field!)!), (element) => element.name === 'input');
+  assert.equal(input?.attribs.value, '1,234.5');
 });

@@ -16,9 +16,12 @@
  * same position. The final pass may render a scope differently from the pass the facades came from (a component
  * that renders extra elements once it knows its light DOM), so the candidate must also carry the recorded node's
  * signature: same tag and the same identity attributes (`id`, `name`, `slot`, `type`, `role`, `part`, `for`,
- * `href`, `src`), compared before any change was applied. When the element at the path does not match (or does not
- * exist), the one element of the scope that matches the signature exactly (including `class`) is used; otherwise
- * the change is skipped and reported (`warn`). Whole documents are parsed like the `ServerTree` parses them
+ * `href`, `src`), compared before any change was applied, and the same content: child elements (tag, `slot`) and
+ * text (`lightSignature` / `fingerprintOf`). When the element at the path does not match (or does not exist), the
+ * one element of the scope with the signature (including `class`) and the content is used - or the only element
+ * with the signature, whose content changed; when several elements have the signature and not exactly one of them
+ * has the recorded content, the change is ambiguous: it is skipped and reported (`warn`), never applied to the
+ * element that happens to be at the recorded position. Whole documents are parsed like the `ServerTree` parses them
  * (review M5: `parse()` instead of `parseFragment()`, which drops `<html>` / `<head>` / `<body>`).
  */
 import {parse, parseFragment, type DefaultTreeAdapterMap} from 'parse5';
@@ -27,6 +30,8 @@ import {
   isDocumentHtml,
   isDocumentNode,
   isElementNode,
+  lightSignature,
+  signatureOf,
   type ServerTree,
   type TreeElementNode,
   type TreeNode,
@@ -146,6 +151,35 @@ function matchesClass(node: TreeElementNode, candidate: P5Element): boolean {
   return (node.attribs.class ?? '') === (attributeOf(candidate, 'class') ?? '');
 }
 
+/** Elements whose text is not content (see `lightSignature` in server-tree.ts). */
+const NON_CONTENT = new Set(['template', 'style', 'script']);
+
+function contentText(node: P5Node, out: string[]): void {
+  for (const child of (node as {childNodes?: P5Node[]}).childNodes ?? []) {
+    if (child.nodeName === '#text') {
+      out.push((child as {value: string}).value);
+    } else if (isP5Element(child) && !NON_CONTENT.has(child.tagName)) {
+      contentText(child, out);
+    }
+  }
+}
+
+/**
+ * Content fingerprint of an element of the final output: its child elements (tag and `slot`) and its text content,
+ * in the format of `lightSignature` (the fingerprint of the recorded element of the previous pass's tree).
+ */
+function fingerprintOf(element: P5Element): string {
+  const tags = elementChildren(element)
+    .map((child) => {
+      const slot = attributeOf(child, 'slot');
+      return slot !== undefined ? `${child.tagName}[${slot}]` : child.tagName;
+    })
+    .join(',');
+  const text: string[] = [];
+  contentText(element, text);
+  return signatureOf(tags, text.join(''));
+}
+
 const STYLE_BODY_RE = /(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi;
 
 /**
@@ -249,24 +283,34 @@ export function applyLightMutations(
       target = target ? elementChildren(target)[index] : undefined;
     }
     let element = target && isP5Element(target) && !claimed.has(target) ? target : undefined;
-    if (!element || !matchesIdentity(node, element) || !matchesClass(node, element)) {
-      // The final pass rendered the scope differently: look for the one element with the recorded signature.
+    const matchesSignature = (candidate: P5Element): boolean =>
+      matchesIdentity(node, candidate) && matchesClass(node, candidate);
+    const fingerprint = lightSignature(node);
+    if (!element || !matchesSignature(element) || fingerprintOf(element) !== fingerprint) {
+      // The final pass rendered the scope differently, or the element at the recorded position has other content:
+      // look for the one element with the recorded signature (and content, when several have the signature).
       let elements = scopes.get(scope);
       if (!elements) {
         elements = scopeElements(scope);
         scopes.set(scope, elements);
       }
-      const exact = elements.filter(
-        (candidate) => !claimed.has(candidate) && matchesIdentity(node, candidate) && matchesClass(node, candidate)
-      );
+      const sameSignature = elements.filter((candidate) => !claimed.has(candidate) && matchesSignature(candidate));
+      const exact = sameSignature.filter((candidate) => fingerprintOf(candidate) === fingerprint);
       if (exact.length === 1) {
         element = exact[0];
-      } else if (!(element && matchesIdentity(node, element) && exact.length === 0)) {
+      } else if (sameSignature.length === 1 && exact.length === 0) {
+        // The only element with the signature, its content changed between the passes: still the recorded element.
+        element = sameSignature[0];
+      } else if (!(element && matchesIdentity(node, element) && sameSignature.length === 0)) {
         // (An element at the recorded position whose identity matches but whose class changed between the passes
-        // is still the recorded element; anything else is ambiguous or missing.)
+        // is still the recorded element; anything else is ambiguous or missing. Review finding (fixed): with several
+        // same-signature elements the change used to land on the one at the recorded position, whatever its content
+        // - e.g. on an element a component rendered before the recorded one in the final pass.)
         warn(
           `light-DOM attribute change not applied: ${
-            exact.length > 1 ? `${exact.length} elements match` : 'no element matches'
+            sameSignature.length > 1
+              ? `${sameSignature.length} elements match${exact.length === 0 ? ' and none has the recorded content' : ''}`
+              : 'no element matches'
           } ${describe(node, changes)} in the final output`,
           location.host
         );

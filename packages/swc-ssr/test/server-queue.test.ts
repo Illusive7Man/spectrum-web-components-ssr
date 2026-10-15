@@ -145,3 +145,57 @@ test('the lazy-definition wait is configurable and only happens for undefined ta
   const waited = await longTimers(() => renderSpectrum(html`<x-lazy-a></x-lazy-a>`, {lazyDefinitionWaitMs: 120, timeoutMs: 0}));
   assert.deepEqual(waited, [120], 'a rendered undefined tag is waited for (once per process), as configured');
 });
+
+/* Review finding (low): delays of 2^31 ms and more overflowed setTimeout to 1 ms. */
+
+class XSlowShadow extends HTMLElement {}
+customElements.define('x-slow-shadow', XSlowShadow);
+class SlowRenderer extends ElementRenderer {
+  static override matchesClass(_ctor: unknown, tagName: string): boolean {
+    return tagName === 'x-slow-shadow';
+  }
+  override renderShadow(): any {
+    return [() => new Promise<string>((resolve) => setTimeout(() => resolve('<b>slow</b>'), 30))];
+  }
+}
+
+test('timeoutMs of 2^31 ms and more means no deadline (it used to time out after 1 ms)', async () => {
+  for (const timeoutMs of [2 ** 31, Number.MAX_SAFE_INTEGER, Infinity]) {
+    const {html: output, report} = await settleWithin(
+      renderSpectrum(html`<x-slow-shadow></x-slow-shadow>`, {
+        elementRenderers: [SlowRenderer as unknown as ElementRendererConstructor],
+        timeoutMs,
+      }),
+      10_000,
+      `the render with timeoutMs ${timeoutMs}`
+    );
+    assert.ok(output.includes('<b>slow</b>'), `timeoutMs ${timeoutMs}`);
+    assert.equal(report.passes, 2, `timeoutMs ${timeoutMs}: ${formatReport(report)}`);
+  }
+});
+
+class XLazyLong extends SpectrumElement {
+  override render() {
+    return html`<x-defined-later></x-defined-later>`;
+  }
+}
+customElements.define('x-lazy-long', XLazyLong);
+
+test('lazyDefinitionWaitMs of 2^31 ms and more waits for the definition (it used to give up after 1 ms)', async () => {
+  setTimeout(() => {
+    customElements.define(
+      'x-defined-later',
+      class extends SpectrumElement {
+        override render() {
+          return html`<b>defined later</b>`;
+        }
+      }
+    );
+  }, 40);
+  const {html: output} = await settleWithin(
+    renderSpectrum(html`<x-lazy-long></x-lazy-long>`, {lazyDefinitionWaitMs: 2 ** 31, timeoutMs: 5000}),
+    10_000,
+    'the render'
+  );
+  assert.match(output, /<x-defined-later[^>]*><template shadowroot[^>]*>[\s\S]*defined later/);
+});
