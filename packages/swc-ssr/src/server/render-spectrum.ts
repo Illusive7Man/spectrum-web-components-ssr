@@ -28,7 +28,6 @@ import {
   activateSession,
   getCurrentRenderContext,
   getRenderScope,
-  hashString,
   runInContext,
   runInRenderScope,
   RenderContext,
@@ -40,9 +39,9 @@ import {
 import {controllersOf, disconnectAll, hasPendingUpdate, isManaged, runDocumentLifecycle} from './lifecycle.js';
 import {needsAdoptionCheck, verifyAdoptions} from './plan.js';
 import {TreeRealm} from './realm.js';
-import {MARKER_ATTRIBUTE, ServerTree} from './server-tree.js';
+import {ServerTree} from './server-tree.js';
 import {awaitLazyDefinitions, finalizeHtml, takeTextareaContent} from './materialize.js';
-import {applyLightMutations} from './light-mutations.js';
+import {applyEdits, lightMutationEdits, type Edit} from './light-mutations.js';
 import {SpectrumElementRenderer} from './spectrum-element-renderer.js';
 import {ThemeRenderer} from './theme-renderer.js';
 import {inspectors} from './adapters/registry.js';
@@ -64,54 +63,69 @@ export const spectrumElementRenderers: ElementRendererConstructor[] = [
   SpectrumElementRenderer as unknown as ElementRendererConstructor,
 ];
 
-const MARKER_RE = new RegExp(` ${MARKER_ATTRIBUTE}="\\d+"`, 'g');
-
 const {changedProperties} = _$LE as unknown as {changedProperties: (element: unknown) => Map<PropertyKey, unknown>};
+
+/** `drain()` in `collect`: the result is complete. */
+const DRAINED = Symbol('drained');
 
 /**
  * Collects a thunked render result into a string. Thunks are evaluated synchronously inside the render
  * context (so renderers constructed by upstream find it); only real Promises (from async lifecycle work or async
  * directives) are awaited, with the context released while waiting.
+ *
+ * Render speed: the context is entered once per synchronous stretch of the result (thunks, strings, arrays), not
+ * once per thunk; every other value (a promise to await, an iterable to spread) is handled outside it, as before.
+ * Nothing but the thunks runs code of others inside the context.
  */
 async function collect(result: unknown, context: RenderContext): Promise<string> {
-  let out = '';
+  // Joined once at the end (render speed: `+=` built a rope of ~300k pieces on the full-catalog page that had to be
+  // flattened, ~40 % slower than one join).
+  const out: string[] = [];
   // Text content for a <textarea> whose `.value` binding was just rendered: goes right after its start tag.
   let textareaContent: string | undefined;
   const stack: Array<{items: unknown[]; index: number}> = [{items: [result], index: 0}];
-  while (stack.length > 0) {
-    const frame = stack[stack.length - 1];
-    if (frame.index >= frame.items.length) {
-      stack.pop();
-      continue;
-    }
-    let value = frame.items[frame.index++];
-    if (typeof value === 'function') {
-      value = runInContext(context, () => {
-        let current = value;
-        while (typeof current === 'function') {
-          current = (current as () => unknown)();
-        }
-        return current;
-      });
-      textareaContent = takeTextareaContent() ?? textareaContent;
-    }
-    if (value === undefined || value === null) {
-      continue;
-    }
-    if (typeof value === 'string') {
-      if (textareaContent !== undefined) {
-        const end = value.indexOf('>');
-        if (end !== -1) {
-          value = value.slice(0, end + 1) + textareaContent + value.slice(end + 1);
-          textareaContent = undefined;
-        }
+  /** Takes values off the stack until one is neither a thunk, a string, an array nor nullish; returns it. */
+  const drain = (): unknown => {
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1];
+      if (frame.index >= frame.items.length) {
+        stack.pop();
+        continue;
       }
-      out += value;
-      continue;
+      let value = frame.items[frame.index++];
+      if (typeof value === 'function') {
+        while (typeof value === 'function') {
+          value = (value as () => unknown)();
+        }
+        textareaContent = takeTextareaContent() ?? textareaContent;
+      }
+      if (value === undefined || value === null) {
+        continue;
+      }
+      if (typeof value === 'string') {
+        let text = value;
+        if (textareaContent !== undefined) {
+          const end = text.indexOf('>');
+          if (end !== -1) {
+            text = text.slice(0, end + 1) + textareaContent + text.slice(end + 1);
+            textareaContent = undefined;
+          }
+        }
+        out.push(text);
+        continue;
+      }
+      if (Array.isArray(value)) {
+        stack.push({items: value, index: 0});
+        continue;
+      }
+      return value;
     }
-    if (Array.isArray(value)) {
-      stack.push({items: value, index: 0});
-      continue;
+    return DRAINED;
+  };
+  for (;;) {
+    const value = runInContext(context, drain);
+    if (value === DRAINED) {
+      break;
     }
     if (typeof (value as PromiseLike<unknown>).then === 'function') {
       const resolved = await (value as PromiseLike<unknown>);
@@ -126,7 +140,7 @@ async function collect(result: unknown, context: RenderContext): Promise<string>
     }
     throw new Error(`Unexpected value in render result: ${String(value)}`);
   }
-  return out;
+  return out.join('');
 }
 
 /**
@@ -278,6 +292,11 @@ function inspect(context: RenderContext): void {
 interface RenderProgress {
   passes: RenderContext[];
   html: string | undefined;
+  /**
+   * A `ServerTree` of `html` built with source locations (the one that verified the adoptions of the pass whose
+   * realm recorded light mutations), reused by `lightMutationEdits`; undefined when there is none.
+   */
+  htmlTree: ServerTree | undefined;
   /** Every context created by this render (also a repeated pass 1 and a pass that failed), disposed at the end. */
   created: RenderContext[];
 }
@@ -396,7 +415,8 @@ async function runPasses(value: unknown, session: RenderSession, progress: Rende
       // A whole-document template's own `<html lang>` is the document language from now on (see context.ts).
       setDocumentLanguage(session, tree.documentLanguage());
     }
-    const context = newContext(session, pass, previous, tree, hashString(html));
+    // Seeded from the previous pass's output (its tree's parsed text, without the long `<style>` bodies).
+    const context = newContext(session, pass, previous, tree, tree.contentHash);
     context.realm = new TreeRealm(context, tree);
     const pooled = runInContext(context, () => context.realm!.preinstantiate());
     session.debug(`pass ${pass}: ${pooled.length} elements pre-instantiated`);
@@ -407,6 +427,7 @@ async function runPasses(value: unknown, session: RenderSession, progress: Rende
     );
     progress.passes.push(context);
     progress.html = html;
+    progress.htmlTree = undefined;
     session.debug(`pass ${pass}: ${context.nextId} elements, ${html.length} chars`);
     const canRetry = pass < MAX_PASSES;
     // Elements without tree information that failed (e.g. a component that reads its own shadow DOM in
@@ -418,7 +439,11 @@ async function runPasses(value: unknown, session: RenderSession, progress: Rende
     let rejected = 0;
     if (needsAdoptionCheck(context)) {
       try {
-        parsed = new ServerTree(html);
+        // With source locations when this pass recorded light mutations: if it is the last pass, the tree locates
+        // them in its output (`lightMutationEdits`) without another parse.
+        const locations = context.realm !== undefined && context.realm.lightMutations.size > 0;
+        parsed = new ServerTree(html, {locations});
+        progress.htmlTree = locations ? parsed : undefined;
         rejected = verifyAdoptions(context, parsed, canRetry);
       } catch (error) {
         parsed = undefined;
@@ -441,7 +466,7 @@ async function renderNow(value: unknown, options: RenderSpectrumOptions): Promis
 async function renderSession(value: unknown, session: RenderSession): Promise<RenderSpectrumResult> {
   const {options} = session;
   const deactivate = activateSession(session);
-  const progress: RenderProgress = {passes: [], html: undefined, created: []};
+  const progress: RenderProgress = {passes: [], html: undefined, htmlTree: undefined, created: []};
   try {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const delay = deadlineDelay(timeoutMs);
@@ -451,6 +476,7 @@ async function renderSession(value: unknown, session: RenderSession): Promise<Re
     // A snapshot: abandoned work could otherwise still add a pass.
     const passes = [...progress.passes];
     let html = progress.html;
+    const htmlTree = progress.htmlTree;
     if (!settled) {
       // Review M6: the render did not settle in time (e.g. a template awaits a promise that never settles). Its
       // remaining work stops at its next step (a wait for lazy definitions ends now); the output of the last
@@ -470,10 +496,14 @@ async function renderSession(value: unknown, session: RenderSession): Promise<Re
       );
     }
     const last = passes[passes.length - 1];
+    // `full` mode without a stylesheet step: the light-DOM changes are applied by `finalizeHtml`, together with the
+    // marker removal (one copy of the page less); otherwise the styles are resolved on the changed page.
+    const collector = styleCollectorOf(session);
+    let pendingEdits: Edit[] = [];
     if (last.realm && last.realm.lightMutations.size > 0) {
       try {
         const realm = last.realm;
-        html = applyLightMutations(
+        const edits = lightMutationEdits(
           html!,
           realm.lightMutations,
           realm.tree,
@@ -487,8 +517,14 @@ async function renderSession(value: unknown, session: RenderSession): Promise<Re
             const report = instance ? last.reportOfInstance(instance) : undefined;
             (report ? report.warnings : session.orphanWarnings).push(message);
           },
-          (message) => session.debug(message)
+          (message) => session.debug(message),
+          htmlTree
         );
+        if (collector) {
+          html = applyEdits(html!, edits);
+        } else {
+          pendingEdits = edits;
+        }
       } catch (error) {
         session.orphanWarnings.push(`could not apply light-DOM attribute changes: ${errorMessage(error)}`);
       }
@@ -510,12 +546,12 @@ async function renderSession(value: unknown, session: RenderSession): Promise<Re
     // `styles: {mode: 'trimmed'}`: the shadow roots carry stylesheet placeholders; resolve them now.
     let output = html!;
     let styles: StylesReport | undefined;
-    const collector = styleCollectorOf(session);
     if (collector) {
       try {
         const resolved = resolveStyles(output, collector);
         output = resolved.html;
         styles = resolved.report;
+        session.orphanWarnings.push(...resolved.warnings);
       } catch (error) {
         session.orphanWarnings.push(
           `could not trim the stylesheets, the complete stylesheets are used: ${errorMessage(error)}`
@@ -528,7 +564,9 @@ async function renderSession(value: unknown, session: RenderSession): Promise<Re
       report.styles = styles;
     }
     return {
-      html: finalizeHtml(options.debug ? output : output.replace(MARKER_RE, '')),
+      // Markers left out (unless `debug`) and light-DOM changes applied while the raw regions are finished: one
+      // copy of the page.
+      html: finalizeHtml(output, !options.debug, pendingEdits),
       report,
     };
   } finally {

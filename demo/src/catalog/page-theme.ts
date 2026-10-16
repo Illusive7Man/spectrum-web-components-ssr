@@ -8,9 +8,6 @@
  * (ES module cache), so it is safe to call many times.
  */
 export async function loadPageTheme(): Promise<void> {
-  await Promise.all([
-    import('@spectrum-web-components/theme/sp-theme.js'),
-    import('@spectrum-web-components/theme/theme-light.js'),
-    import('@spectrum-web-components/theme/scale-medium.js'),
-  ]);
+  // One module that imports the fragments before <sp-theme>: the evaluation order is fixed (see page-theme-register.ts).
+  await import('./page-theme-register.ts');
 }

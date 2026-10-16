@@ -59,10 +59,28 @@ export interface SerializeOptions {
   stripMarkers?: boolean;
 }
 
+export interface ServerTreeOptions {
+  /**
+   * Keep source locations: every node gets parse5's `sourceCodeLocation` (start tag and attribute offsets), which
+   * `sourceOffset()` maps to offsets in the HTML the tree was built from (light-mutations.ts edits that HTML).
+   */
+  locations?: boolean;
+}
+
+/** A replaced `<style>` body (see `ServerTree.sourceOffset`). */
+interface StyleCut {
+  /** Offset in the parsed text right after the placeholder. */
+  at: number;
+  /** Characters removed up to and including this cut (original minus parsed length). */
+  shift: number;
+}
+
 export class ServerTree {
   readonly root: Document;
   /** Whether the HTML was a whole document (parsed with `parse()`, see `isDocumentHtml`). */
   readonly isDocument: boolean;
+  /** Whether the nodes carry source locations (`ServerTreeOptions.locations`). */
+  readonly hasLocations: boolean;
   private readonly nodesById = new Map<number, Element>();
   private readonly idsByNode = new Map<Element, number>();
   private readonly shadows = new Map<Element, Document>();
@@ -73,22 +91,76 @@ export class ServerTree {
 
   /** CSS of `<style>` elements, replaced by short placeholders before parsing (see constructor). */
   private readonly styles: string[] = [];
+  /** With source locations: the replaced `<style>` bodies, in order. */
+  private readonly cuts: StyleCut[] = [];
+  /** The parsed text, until `contentHash` has hashed it. */
+  private parsedText: string | undefined;
+  private hash: number | undefined;
 
-  constructor(html: string) {
+  constructor(html: string, options: ServerTreeOptions = {}) {
     // Most of the pass-1 HTML is CSS (every shadow root carries its styles). It is irrelevant for the tree, so
     // it is swapped for placeholders before parsing (much less tokenizing and garbage) and restored when the
     // tree is serialized.
-    const compact = html.replace(STYLE_RE, (match, open: string, css: string, close: string) => {
+    const locations = options.locations === true;
+    let shift = 0;
+    const compact = html.replace(STYLE_RE, (match, open: string, css: string, close: string, offset: number) => {
       if (css.length < 64) {
         return match;
       }
       this.styles.push(css);
-      return `${open}/*${STYLE_PLACEHOLDER}${this.styles.length - 1}*/${close}`;
+      const placeholder = `/*${STYLE_PLACEHOLDER}${this.styles.length - 1}*/`;
+      if (locations) {
+        // The body starts at `offset + open.length` in `html`, `shift` characters earlier in `compact`.
+        const at = offset + open.length - shift + placeholder.length;
+        shift += css.length - placeholder.length;
+        this.cuts.push({at, shift});
+      }
+      return `${open}${placeholder}${close}`;
     });
     this.isDocument = isDocumentHtml(compact);
+    this.parsedText = compact;
+    this.hasLocations = locations;
     const parseHtml = this.isDocument ? parse : parseFragment;
-    this.root = parseHtml(compact, {treeAdapter: htmlparser2Adapter}) as unknown as Document;
+    this.root = parseHtml(compact, {
+      treeAdapter: htmlparser2Adapter,
+      sourceCodeLocationInfo: locations,
+    }) as unknown as Document;
     this.index(this.root);
+  }
+
+  /**
+   * FNV-1a hash (32 bits) of the parsed text: the HTML with every `<style>` body of 64 or more characters replaced by
+   * a numbered placeholder. Seeds the deterministic random source of the pass built on this tree (render speed: the
+   * whole HTML of a `full`-mode page is ~95 % CSS; hashing it took ~30 ms per pass on the full catalog).
+   */
+  get contentHash(): number {
+    if (this.hash === undefined) {
+      this.hash = fnv1a(this.parsedText ?? '');
+      this.parsedText = undefined;
+    }
+    return this.hash;
+  }
+
+  /**
+   * Trees built with `locations`: the offset in the HTML the tree was built from of an offset in a node's
+   * `sourceCodeLocation` (which refers to the parsed text, where long `<style>` bodies are placeholders). Offsets
+   * inside a replaced `<style>` body are not meaningful.
+   */
+  sourceOffset(offset: number): number {
+    const cuts = this.cuts;
+    let low = 0;
+    let high = cuts.length - 1;
+    let shift = 0;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      if (cuts[middle].at <= offset) {
+        shift = cuts[middle].shift;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    return offset + shift;
   }
 
   /** Whole documents: the `lang` of their `<html>` element (undefined when absent or empty, and for fragments). */
@@ -118,7 +190,10 @@ export class ServerTree {
   }
 
   private index(parent: ParentNode): void {
-    for (const child of [...parent.children]) {
+    // (Detaching a shadow template changes the children of `child`, never `parent.children`: no copy needed.)
+    const children = parent.children;
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
       if (!isElementNode(child)) {
         continue;
       }
@@ -267,12 +342,17 @@ export function childNodes(parent: ParentNode): ChildNode[] {
 
 /** FNV-1a hash of a string, base 36. */
 function shortHash(text: string): string {
+  return fnv1a(text).toString(36);
+}
+
+/** FNV-1a hash (32 bits, unsigned) of a string's UTF-16 code units. */
+export function fnv1a(text: string): number {
   let hash = 0x811c9dc5;
   for (let i = 0; i < text.length; i++) {
     hash ^= text.charCodeAt(i);
     hash = Math.imul(hash, 0x01000193);
   }
-  return (hash >>> 0).toString(36);
+  return hash >>> 0;
 }
 
 /** Elements whose text is not content (CSS is also replaced by placeholders in the tree). */

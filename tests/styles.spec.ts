@@ -524,6 +524,13 @@ async function heldStage(
     }
     await settleFrames(page, 2);
     await page.waitForTimeout(SETTLE_MS);
+    // Repainted like every later capture: `<sp-theme>` upgraded (and, trimmed / minified, got its bridge `<style>`
+    // back), so its subtree was repainted with unchanged computed values, and Chrome may rasterize an anti-aliased edge
+    // one colour level differently from the first paint until the next repaint. Probed (0.3.0,
+    // .probe/integrate/theme-interim-pixels.ts): the minified theme page's interim capture differed from itself by 1 px
+    // before / after a repaint in every load, computed styles and geometry of all 49 elements equal to full's; both
+    // pages repainted: 0 px. A repaint re-rasterizes the current styles, so a real CSS difference still shows.
+    await forceRepaint(page);
     const shots: Record<string, ShotSet> = {};
     shots.interim = await captureShots(page, target, reference?.shots.interim, only);
 
@@ -696,6 +703,63 @@ async function postStateRun(
   } finally {
     await opened.context.close();
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Layout measured by the elements themselves (post-hydration:layout)
+// ---------------------------------------------------------------------------------------------
+
+/** Targets with elements that position their `sp-color-handle` from a measurement of themselves. */
+const LAYOUT_TARGETS = new Set(['color-area']);
+/** Loads per mode in `post-hydration:layout` (the stuck handle showed up in 11 of 14 catalog loads). */
+const LAYOUT_LOADS = 3;
+
+interface HandlePosition {
+  /** Host tag and its index among the measured hosts of the scope, e.g. `sp-color-area#2`. */
+  host: string;
+  /** Offset of the handle's border box from the host's, rounded px, `x,y`. */
+  offset: string;
+  /** Whether the handle's computed `transform` moves it (translate(0, 0) is the server's unmeasured position). */
+  moved: boolean;
+}
+
+/** Every `sp-color-handle` in the shadow roots of the color elements under `root` (page function). */
+function measureHandles(root: string): HandlePosition[] {
+  const scope = document.querySelector(root);
+  if (!scope) return [];
+  const out: HandlePosition[] = [];
+  Array.from(scope.querySelectorAll('sp-color-area, sp-color-slider, sp-color-wheel')).forEach((host, index) => {
+    for (const handle of Array.from(host.shadowRoot?.querySelectorAll('sp-color-handle') ?? [])) {
+      const h = handle.getBoundingClientRect();
+      const a = host.getBoundingClientRect();
+      const transform = getComputedStyle(handle).transform;
+      const matrix = transform === 'none' ? undefined : new DOMMatrixReadOnly(transform);
+      out.push({
+        host: `${host.localName}#${index}`,
+        offset: `${Math.round(h.left - a.left)},${Math.round(h.top - a.top)}`,
+        moved: matrix !== undefined && (matrix.m41 !== 0 || matrix.m42 !== 0),
+      });
+    }
+  });
+  return out;
+}
+
+/** Differences between `actual` and `reference` handle positions (0 px), and color-area handles that did not move. */
+function handleProblems(label: string, actual: HandlePosition[], reference: HandlePosition[]): string[] {
+  const problems: string[] = [];
+  if (actual.length !== reference.length) {
+    problems.push(`${label}: ${actual.length} handles, the client-rendered page has ${reference.length}`);
+  }
+  actual.forEach((handle, i) => {
+    const expected = reference[i];
+    if (expected && (expected.host !== handle.host || expected.offset !== handle.offset)) {
+      problems.push(`${label}: ${handle.host} handle at ${handle.offset}, client-side rendering ${expected.offset}`);
+    }
+    if (handle.host.startsWith('sp-color-area') && !handle.moved) {
+      problems.push(`${label}: ${handle.host} handle not moved from the corner (${handle.offset})`);
+    }
+  });
+  return problems;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1063,6 +1127,66 @@ function registerTargetTests(target: StylesTarget, timeoutMs: number): void {
         ).toEqual([]);
       });
     });
+
+    if (isPage || LAYOUT_TARGETS.has(target.name ?? '')) {
+      /**
+       * `sp-color-area` measures itself from a ResizeObserver its own `connectedCallback()` starts at the upgrade,
+       * while the element still waits for hydration. Measured before its hydrating update, the hydrating render
+       * differed from the server markup only in the handle's `style`, which lit's `hydrate()` does not write: the
+       * handle stayed in the corner (11 of 14 catalog loads with the split demo bundle). Every `sp-color-handle` must
+       * sit where client-side rendering puts it (0 px) - when `window.__swcSsrHydration` resolves and after the page
+       * settled - in every style mode, `LAYOUT_LOADS` loads each, without retries.
+       */
+      test('post-hydration:layout', async ({browser}, testInfo) => {
+        const baseURL = testInfo.project.use.baseURL;
+        const navigation = {timeout: isPage ? PAGE_NAV_TIMEOUT_MS : 30_000};
+        const hydration = isPage ? PAGE_HYDRATION_TIMEOUT_MS : undefined;
+        const settle = {timeoutMs: isPage ? PAGE_SETTLE_TIMEOUT_MS : 5000};
+
+        const csrContext = await newOracleContext(browser, baseURL, {javaScriptEnabled: true});
+        let reference: HandlePosition[];
+        try {
+          const page = await csrContext.newPage();
+          const url = isPage ? '/csr' : `/csr/${encodeURIComponent(target.name!)}`;
+          const response = await page.goto(url, navigation);
+          expect(response?.status(), `GET ${url} status`).toBe(200);
+          await awaitHydration(page, hydration);
+          await page.locator(scope.root).evaluate(settleTree, settle);
+          await settleFrames(page, 2);
+          await page.waitForTimeout(SETTLE_MS);
+          reference = await page.evaluate(measureHandles, scope.root);
+        } finally {
+          await csrContext.close();
+        }
+        expect(reference.length, 'sp-color-handle elements on the client-rendered page').toBeGreaterThan(0);
+        expectNone(handleProblems('client-side rendering', reference, reference), 'client-rendered color-area handles');
+
+        const problems: string[] = [];
+        for (let load = 1; load <= LAYOUT_LOADS; load++) {
+          for (const mode of ['full', 'trimmed', 'minified'] as const) {
+            const context = await newOracleContext(browser, baseURL, {javaScriptEnabled: true});
+            try {
+              const page = await context.newPage();
+              const errors = collectConsole(page).errors;
+              const url = pageUrl(target, mode);
+              const response = await page.goto(url, navigation);
+              expect(response?.status(), `GET ${url} status`).toBe(200);
+              const report = await awaitHydration(page, hydration);
+              problems.push(...handleProblems(`load ${load} ${mode} at hydration`, await page.evaluate(measureHandles, scope.root), reference));
+              await page.locator(scope.root).evaluate(settleTree, settle);
+              await settleFrames(page, 2);
+              await page.waitForTimeout(SETTLE_MS);
+              problems.push(...handleProblems(`load ${load} ${mode} settled`, await page.evaluate(measureHandles, scope.root), reference));
+              problems.push(...report.errors.map((error) => `load ${load} ${mode}: HydrationReport.errors: ${error}`));
+              problems.push(...errors.map((error) => `load ${load} ${mode}: console error: ${error}`));
+            } finally {
+              await context.close();
+            }
+          }
+        }
+        expectNone(problems, 'sp-color-handle positions after hydration that differ from client-side rendering');
+      });
+    }
 
     if (target.interactive) {
       test('post-hydration:states', async ({browser}, testInfo) => {

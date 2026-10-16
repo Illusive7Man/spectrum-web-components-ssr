@@ -48,7 +48,7 @@ import {
   type StyleMarker,
 } from './collector.js';
 import {compileSelectorList, Instance, listMayMatch, type ComplexMatcher} from './selector-match.js';
-import {hasRelativeUrl, INLINE_BELOW_BYTES, Linker, setStyleHead} from './dedupe.js';
+import {hasRelativeUrl, INLINE_BELOW_BYTES, Linker} from './dedupe.js';
 
 interface ParsedSheet {
   text: string;
@@ -133,6 +133,8 @@ interface SheetState {
 export interface ResolvedStyles {
   html: string;
   report: StylesReport;
+  /** Problems that did not stop the resolution (a `dedupeUrl` that threw), for the render's report. */
+  warnings: string[];
 }
 
 function keepMatches(prelude: string, keep: Array<string | RegExp>): boolean {
@@ -255,7 +257,32 @@ export function resolveStyles(html: string, collector: StyleCollector): Resolved
   /** CSS of the output the trimmer does not control (other `<style>` elements, complete stylesheets). */
   const otherCss: string[] = [];
 
-  if (html.includes(PLACEHOLDER_PREFIX)) {
+  if (html.includes(PLACEHOLDER_PREFIX) && options.mode !== 'trimmed') {
+    // `full` mode with `dedupe: 'link'`: nothing is trimmed (no parse); only the occurrences are counted.
+    for (const match of html.matchAll(PLACEHOLDER_RE)) {
+      const entry = collector.entries[Number(match[1])];
+      if (!entry) {
+        continue;
+      }
+      let state = states.get(entry.id);
+      if (!state) {
+        state = {
+          entry,
+          parsed: UNPARSED,
+          instances: [],
+          instanceSet: new Set(),
+          occurrences: 0,
+          untrimmable: true,
+          kept: new Set(),
+          values: new Map(),
+          text: entry.cssText,
+          renamed: false,
+        };
+        states.set(entry.id, state);
+      }
+      state.occurrences++;
+    }
+  } else if (html.includes(PLACEHOLDER_PREFIX)) {
     const tree = new ServerTree(html);
     const instances = new Map<Element, Instance>();
     const stateOf = (entry: SheetEntry): SheetState => {
@@ -356,34 +383,71 @@ export function resolveStyles(html: string, collector: StyleCollector): Resolved
     }
   }
 
-  const output = html.includes(PLACEHOLDER_PREFIX) ? substitute(html, states, collector) : html;
+  const linker = options.dedupe === 'link' ? new Linker(options.dedupeUrl) : undefined;
+  const output = html.includes(PLACEHOLDER_PREFIX) ? substitute(html, states, collector, linker) : html;
   const sheets: StylesReport['sheets'] = [];
   let fullBytes = 0;
   let trimmedBytes = 0;
   for (const state of [...states.values()].sort((a, b) => a.entry.id - b.entry.id)) {
     const full = utf8Length(state.entry.cssText);
     const kept = state.text === state.entry.cssText ? full : utf8Length(state.text);
-    sheets.push({id: state.entry.label, tag: state.entry.tag, instances: state.occurrences, fullBytes: full, trimmedBytes: kept});
+    const sheet: StylesReport['sheets'][number] = {
+      id: state.entry.label,
+      tag: state.entry.tag,
+      instances: state.occurrences,
+      fullBytes: full,
+      trimmedBytes: kept,
+    };
+    const linked = linker?.sheetOf(state.text);
+    if (linked !== undefined) {
+      sheet.hash = linked.hash;
+    }
+    sheets.push(sheet);
     fullBytes += full * state.occurrences;
     trimmedBytes += kept * state.occurrences;
   }
-  return {
-    html: output,
-    report: {
-      mode: 'trimmed',
-      sheets,
-      fullBytes,
-      trimmedBytes,
-      durationMs: Math.round((performance.now() - started) * 100) / 100,
-    },
+  const report: StylesReport = {
+    mode: options.mode,
+    sheets,
+    fullBytes,
+    trimmedBytes,
+    durationMs: 0,
   };
+  if (linker) {
+    report.dedupe = linker.report();
+  }
+  report.durationMs = Math.round((performance.now() - started) * 100) / 100;
+  return {html: output, report, warnings: linker ? [...linker.warnings] : []};
+}
+
+/** `SheetState.parsed` of `full` mode with `dedupe: 'link'`: never read (nothing is trimmed). */
+const UNPARSED: ParsedSheet = {text: '', nodes: [], selectors: new Map(), bodies: new Map()};
+
+/**
+ * `dedupe: 'link'`: whether a stylesheet's text is linked rather than inlined (see the file comment of dedupe.ts):
+ * not a minified theme fragment (the client's theme bridge moves the `<style>` back after `<sp-theme>` upgraded), at
+ * least `INLINE_BELOW_BYTES` long, and without relative `url()` / `@import` references.
+ */
+function linkable(state: SheetState): boolean {
+  if (state.entry.theme && state.renamed) {
+    return false;
+  }
+  return utf8Length(state.text) >= INLINE_BELOW_BYTES && !hasRelativeUrl(state.text);
 }
 
 /**
  * Step 6: replaces every placeholder token with its stylesheet's text and marks the `<style>` elements whose text
- * changed (`'minified'` wins over `'trimmed'` when a `<style>` holds several stylesheets).
+ * changed (`'minified'` wins over `'trimmed'` when a `<style>` holds several stylesheets). With `dedupe: 'link'`
+ * (`linker`) a linkable stylesheet becomes a `<link data-swc-styles="minified|trimmed|complete">` instead, in its
+ * place: `<style>A B C</style>` with B linked becomes `<style>A</style><link B><style>C</style>` (the cascade order of
+ * the shadow root is the document order of its `<style>` / `<link>` elements).
  */
-function substitute(html: string, states: Map<number, SheetState>, collector: StyleCollector): string {
+function substitute(
+  html: string,
+  states: Map<number, SheetState>,
+  collector: StyleCollector,
+  linker: Linker | undefined,
+): string {
   const textOf = (id: number): string => {
     const state = states.get(id);
     return state ? state.text : (collector.entries[id]?.cssText ?? '');
@@ -398,18 +462,52 @@ function substitute(html: string, states: Map<number, SheetState>, collector: St
     }
     return state.text === state.entry.cssText ? undefined : 'trimmed';
   };
+  const linkDecisions = new Map<number, boolean>();
+  const linked = (id: number): boolean => {
+    if (!linker) {
+      return false;
+    }
+    let decision = linkDecisions.get(id);
+    if (decision === undefined) {
+      const state = states.get(id);
+      decision = state !== undefined && linkable(state);
+      linkDecisions.set(id, decision);
+    }
+    return decision;
+  };
+  const styleElement = (text: string, marker: StyleMarker | undefined): string =>
+    marker ? `<style ${STYLE_MARKER_ATTRIBUTE}="${marker}">${text}</style>` : `<style>${text}</style>`;
   let output = html.replace(PLACEHOLDER_STYLE_RE, (_match, tokens: string) => {
+    let out = '';
     let text = '';
     let marker: StyleMarker | undefined;
+    let open = false;
     for (const token of tokens.matchAll(PLACEHOLDER_RE)) {
       const id = Number(token[1]);
-      text += textOf(id);
+      // (`link()` is undefined when the application's `dedupeUrl` threw for the text: it stays inline.)
+      const link = linked(id) ? linker!.link(textOf(id), markerOf(id) ?? 'complete') : undefined;
+      if (link !== undefined) {
+        if (open) {
+          out += styleElement(text, marker);
+          open = false;
+          text = '';
+          marker = undefined;
+        }
+        out += link;
+        continue;
+      }
+      open = true;
+      const sheetText = textOf(id);
+      text += sheetText;
+      if (linker) {
+        linker.inlineBytes += utf8Length(sheetText);
+      }
       const sheetMarker = markerOf(id);
       if (sheetMarker === 'minified' || (sheetMarker && !marker)) {
         marker = sheetMarker;
       }
     }
-    return marker ? `<style ${STYLE_MARKER_ATTRIBUTE}="${marker}">${text}</style>` : `<style>${text}</style>`;
+    return open ? out + styleElement(text, marker) : out;
   });
   if (output.includes(PLACEHOLDER_PREFIX)) {
     // Tokens outside a `<style>` of their own (not emitted by the renderers; defensive): text only.

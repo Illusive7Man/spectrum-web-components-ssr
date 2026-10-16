@@ -33,7 +33,12 @@ export const PLACEHOLDER_STYLE_RE = /<style>((?:\u0001swc-css:\d+\u0001)+)<\/sty
  * theme names until every marked element is restored.
  */
 export const STYLE_MARKER_ATTRIBUTE = 'data-swc-styles';
-export type StyleMarker = 'trimmed' | 'minified';
+/**
+ * `'complete'` (0.3.0) only occurs on a `<link>` of `StyleOptions.dedupe: 'link'`: a stylesheet nothing was taken from,
+ * linked instead of inlined. Every server `<link>` carries a marker, so that the client restores the element's complete
+ * sheets and removes the `<link>` like a marked `<style>`.
+ */
+export type StyleMarker = 'trimmed' | 'minified' | 'complete';
 
 export interface SheetEntry {
   /** Number in the placeholder token. */
@@ -50,6 +55,10 @@ export interface SheetEntry {
 
 export interface NormalizedStyleOptions {
   mode: 'full' | 'trimmed';
+  /** `StyleOptions.dedupe` (0.3.0): `'link'` links every distinct stylesheet text (styles/dedupe.ts). */
+  dedupe: 'none' | 'link';
+  /** `StyleOptions.dedupeUrl`; undefined: `/swc-css/<hash>.css`. */
+  dedupeUrl: ((hash: string, css: string) => string) | undefined;
   trimTheme: boolean;
   referenceNames: Set<string>;
   referencePrefixes: string[];
@@ -94,8 +103,11 @@ export function normalizeStyleOptions(options: StyleOptions | undefined): Normal
       referenceNames.add(name);
     }
   }
+  const dedupeUrl = options?.dedupeUrl;
   return {
     mode,
+    dedupe: options?.dedupe === 'link' ? 'link' : 'none',
+    dedupeUrl: typeof dedupeUrl === 'function' ? dedupeUrl : undefined,
     trimTheme: options?.trimTheme ?? true,
     referenceNames,
     referencePrefixes,
@@ -153,8 +165,9 @@ export class StyleCollector {
 const collectors = new WeakMap<object, StyleCollector | null>();
 
 /**
- * The style collector of a render session; undefined in `full` mode (the renderers then emit the `cssText` as
- * before, byte for byte).
+ * The style collector of a render session; undefined in `full` mode without `dedupe: 'link'` (the renderers then emit
+ * the `cssText` as before, byte for byte). `full` mode with `dedupe: 'link'` collects too: the placeholders become
+ * `<link>`s to the complete stylesheets (`resolveStyles` in trim.ts, without trimming).
  */
 export function styleCollectorOf(session: {options: RenderSpectrumOptions} | undefined): StyleCollector | undefined {
   if (!session) {
@@ -163,7 +176,7 @@ export function styleCollectorOf(session: {options: RenderSpectrumOptions} | und
   let collector = collectors.get(session);
   if (collector === undefined) {
     const options = normalizeStyleOptions(session.options.styles);
-    collector = options.mode === 'trimmed' ? new StyleCollector(options) : null;
+    collector = options.mode === 'trimmed' || options.dedupe === 'link' ? new StyleCollector(options) : null;
     collectors.set(session, collector);
   }
   return collector ?? undefined;

@@ -28,7 +28,11 @@ process with `configureRandomSource({deterministicIds: false})` (Spectrum's ids 
 renders of a page, which can break server-rendered `aria-labelledby` / `id` pairs). Restricting it to `randomID()`
 itself would need a stack inspection per request, which breaks as soon as the server is bundled; it is not done.
 `randomID()` calls made outside the synchronous parts of a render (e.g. in a microtask a component scheduled) use the
-CSPRNG, so those ids differ between renders.
+CSPRNG, so those ids differ between renders. The source of pass 2 and later passes is seeded from the previous pass's
+output: since 0.3.0 from the FNV-1a hash of its parsed text (the HTML with every `<style>` body of 64 or more
+characters replaced by a numbered placeholder, `ServerTree.contentHash`), before from the whole HTML. The same page
+therefore gets other `randomID()` suffixes than with 0.2.x (`sp-field-label-xxxxxxxx`), still the same ones in every
+render; structure and references are unchanged.
 
 `installSpectrumDomShim()` installs **process-wide, permanent** globals that are never removed: `window` (=
 `globalThis`, a plain data property), `navigator`, `matchMedia` (never matches), `requestAnimationFrame` /
@@ -38,6 +42,15 @@ CSPRNG, so those ids differ between renders.
 `innerWidth` & co., `screen`, `scrollTo` / `scrollBy` and the element / event classes. Libraries that sniff
 `typeof window` take their browser branch afterwards: import them before `installSpectrumSsr()` or keep them in a
 separate process / worker. Scoping `window` to renders is not feasible (see DESIGN.md "Process-wide state").
+
+**Selectors.** `querySelector` / `querySelectorAll` / `matches` / `closest` on server nodes evaluate the selector
+against the tree as it is at the call (attributes are read through `getAttribute`), like a browser: a query after a
+component changed an ancestor's attributes sees the change. Since 0.3.0 compiled selectors are cached process-wide
+(bounded, per selector string; selectors with `:scope` are compiled per call); they are compiled with css-select's
+`cacheResults: false`, so a compiled selector keeps no state about the nodes it saw. (The 0.3.0 review found the
+default `cacheResults: true` returning stale results through the shared cache: `.on span` stayed unmatched after
+`p.setAttribute('class', 'on')`, and a component that queried after its sibling marked an ancestor rendered other
+markup than the browser. Fixed before release; the render time is unaffected.)
 
 ## `swc-ssr/server`  (`packages/swc-ssr/src/server/index.ts`)
 
@@ -95,12 +108,21 @@ export interface RenderReport {
                           // element was updated after its markup was emitted, or an element adopted the
                           // previous-pass instance of another element (`adopted candidate rejected`) (at most 3)
   durationMs: number;     // includes the event-loop turn at the end of the render (see below)
-  styles?: StylesReport;  // only when StyleOptions.mode is 'trimmed' (see "Styles")
+  styles?: StylesReport;  // when StyleOptions.mode is 'trimmed', and in any mode with dedupe: 'link' (see "Styles")
 }
 
-export interface RenderSpectrumResult { html: string; report: RenderReport; }
+export interface RenderSpectrumResult {
+  html: string;
+  report: RenderReport;
+  head?: string;          // 0.3.0: markup for the page's <head> - with StyleOptions.dedupe 'link' one
+                          // <link rel="preload" href="..." as="style"> per linked URL (order of first use), else ''.
+                          // Optional in this type only; renderSpectrum() below always sets it
+}
 
-export function renderSpectrum(value: unknown, options?: RenderSpectrumOptions): Promise<RenderSpectrumResult>;
+export function renderSpectrum(
+  value: unknown,
+  options?: RenderSpectrumOptions,
+): Promise<RenderSpectrumResult & {head: string}>;
 
 export class SpectrumElementRenderer /* extends LitElementRenderer */ {}
 export class ThemeRenderer /* extends ElementRenderer */ {}
@@ -131,8 +153,40 @@ export class ServerTree { /* see below */ }
 // Styles (see "Styles" below)
 export function scanCustomPropertyReferences(text: string): string[];  // every var(--x) name of a CSS / JS text
 export const STYLE_MARKER_ATTRIBUTE = 'data-swc-styles';
-export type StyleMarker = 'trimmed' | 'minified';
-export type {StyleOptions, StylesReport};
+export type StyleMarker = 'trimmed' | 'minified' | 'complete';   // 'complete' (0.3.0): only on a dedupe <link>
+export type {StyleOptions, StylesReport, StylesDedupeReport};
+
+// Style de-duplication (0.3.0, StyleOptions.dedupe: 'link'; see "Styles")
+export class StyleSheetStore {                              // LRU of distinct stylesheet texts by content hash
+  constructor(options?: StyleSheetStoreOptions);            // {maxBytes?, minLifetimeMs?, now?: () => number}
+  maxBytes: number;                                         // budget (UTF-8 bytes of the texts), default 32 MiB;
+                                                            // lowering it evicts at once
+  minLifetimeMs: number;                                    // 0.3.0 review: a text is not evicted for this long after
+                                                            // a render last put it (default 60_000; 0 = pure LRU), so
+                                                            // pages just served can still fetch their sheets; above
+                                                            // 2 x maxBytes the oldest go even when fresh
+  evictions: number; freshEvictions: number;                // counters: texts evicted / of those, within their
+                                                            // protection (each one a possible 404)
+  readonly size: number; readonly bytes: number;
+  get(hash: string): string | undefined;                    // counts as a use
+  put(css: string): string;                                 // stores under styleSheetHash(css), returns the hash
+                                                            // (a use, and a new protection period)
+  has(hash: string): boolean; delete(hash: string): boolean; clear(): void;
+}
+export const DEFAULT_STORE_MIN_LIFETIME_MS = 60_000;
+export const styleSheetStore: StyleSheetStore;              // the process-wide store renderSpectrum() puts into
+                                                            // (least recently used evicted first)
+export function getStyleSheet(hash: string): string | undefined;   // styleSheetStore.get(hash) for a well-formed
+                                                            // hash: serve it as text/css (see "Styles")
+export function styleSheetHash(css: string): string;        // 16 characters of base64url (96 bits of SHA-256 of
+                                                            // the UTF-8 text)
+export const DEFAULT_STYLE_SHEET_PATH = '/swc-css/';        // default URLs: /swc-css/<hash>.css
+export const STYLE_SHEET_HASH_RE: RegExp;                   // what a hash looks like (route validation)
+export type StyleHeadHint = 'preload' | 'stylesheet-not-all';
+export function styleHeadOf(styles: StylesReport | undefined, hint?: StyleHeadHint): string;
+                                                            // the <head> markup for report.styles.dedupe ('' without);
+                                                            // 'preload' (default, = result.head) or
+                                                            // <link rel="stylesheet" media="not all">
 ```
 
 Built-in adapters (`packages/swc-ssr/src/server/adapters/`): `sp-theme` (lifecycle `none`), `sp-overlay` (kept closed,
@@ -204,6 +258,32 @@ in browsers. Writes made by the renderer (upstream `ElementRenderer.setAttribute
   `--unhandled-rejections` mode (throw by default). An application with its own listener decides itself (it also sees
   render-created rejections: Node emits to every listener), and no warning is emitted then.
 
+### Performance notes
+
+* **Cost.** A render is synchronous CPU work for most of its time and runs in the renderers' queue (one at a time per
+  process): about 0.65-0.7 ms per element on one-component pages and 1.4 ms per element on the 1349-element catalog
+  page (3 passes) in 0.3.0, measured on a 15 W laptop CPU (`/component/button` 21 ms, the catalog 1.9 s in `full` mode,
+  2.1-2.2 s trimmed / minified; 0.2.1: 30 ms and 3.8 s; docs/DESIGN.md "Performance"). The whole page is rendered before
+  `renderSpectrum()` resolves; nothing is streamed. Pages that need a third pass (an element appears only in pass 2 and
+  fails there: `sp-action-menu` in an `sp-breadcrumbs` overflow, `sp-button-group` in an `sp-dialog` footer, `sp-slider`
+  on a page with a dialog) cost one more pass. Trimming adds about 9-25 ms per one-component page and 0.25 s on the
+  catalog; `dedupe: 'link'` adds nothing measurable. A long render blocks the event loop of its process (rendering in
+  `worker_threads` workers, each with its own shim and queue, is not tested here).
+* **Linear finish.** The last step of a render (light-DOM attribute edits, `data-swc-ssr` marker removal, raw DOM-node
+  regions) is one pass over the page whatever the number of raw regions (0.3.0 review: a marker scan restarted at every
+  region boundary made pages with thousands of raw regions after their last marker quadratic - 5,000 regions up to
+  3.1 s, 20,000 regions 15 s; now 14 ms / 32 ms, `perf-finalize.test.ts` guards the ratio).
+* **Bytes.** Serve the HTML compressed, brotli if possible: every shadow root repeats its class's stylesheet, which
+  brotli's window removes and gzip's 32 KB window does not (`full` button page: 1253 KB, 121 KB gzip, 44 KB brotli;
+  the trimmed catalog: 13.6 MB, 997 KB gzip, 180 KB brotli). Trimming and minification shrink what is parsed and kept in
+  memory by the browser as well, not only the transfer. `dedupe: 'link'` cuts the HTML to 3-9 % of the trimmed page (button:
+  28 KB, catalog 1.2 MB) and moves the CSS into cacheable files; with brotli its first (cold) load transfers about as
+  much as the inline page (button trimmed: 15 KB vs 12 KB, catalog 201 KB vs 180 KB), repeat visits transfer the HTML
+  only (3 KB / 62 KB). See "Styles" for its paint trade-off.
+* **Memory.** Heap after GC is flat over repeated renders (whole catalog: 111-114 MB `full`, 100-103 MB trimmed, 50-51 MB
+  trimmed + `dedupe: 'link'`). Process-wide caches are bounded (docs/DESIGN.md "Process-wide state"); `styleSheetStore`
+  holds at most `maxBytes` (32 MiB) of stylesheet text.
+
 ### Report semantics
 
 The pass-2 pool is keyed structurally: tree scope + tag + a short hash of the template's static attributes +
@@ -256,14 +336,30 @@ export interface StyleOptions {
   minifyCustomProperties?: boolean;    // default false; unsafe when the app sets / reads --spectrum-* names
   keep?: ReadonlyArray<string | RegExp>;  // selectors (substring of, or RegExp tested against, the selector text)
                                        // always kept; a single string or RegExp is one entry
+  dedupe?: 'none' | 'link';            // 0.3.0, default 'none' (other values count as 'none'); any mode. 'link': one
+                                       // copy per distinct stylesheet text, linked from every shadow root (below)
+  dedupeUrl?: (hash: string, css: string) => string;
+                                       // dedupe 'link': URL of a stored text; default `/swc-css/${hash}.css`. Called
+                                       // once per distinct text and render; the result is HTML-escaped
 }
 
-export interface StylesReport {        // RenderReport.styles, trimmed mode only
-  mode: string;                        // 'trimmed' (also with minifyCustomProperties)
-  sheets: Array<{id: string; tag: string; instances: number; fullBytes: number; trimmedBytes: number}>;
+export interface StylesReport {        // RenderReport.styles: trimmed mode, and any mode with dedupe 'link'
+  mode: string;                        // 'trimmed' (also with minifyCustomProperties), or 'full' (dedupe 'link' only)
+  sheets: Array<{id: string; tag: string; instances: number; fullBytes: number; trimmedBytes: number;
+                 hash?: string}>;      // hash (dedupe 'link'): the stored text the sheet was linked as; absent inline
   fullBytes: number;                   // sum of fullBytes x instances: the CSS the page carries in full mode
-  trimmedBytes: number;                // sum of trimmedBytes x instances: the CSS it carries now
-  durationMs: number;                  // time spent trimming (part of RenderReport.durationMs)
+  trimmedBytes: number;                // sum of trimmedBytes x instances: the CSS it carries without dedupe
+  durationMs: number;                  // time spent trimming / linking (part of RenderReport.durationMs)
+  dedupe?: StylesDedupeReport;         // dedupe 'link' only
+}
+
+export interface StylesDedupeReport {
+  mode: 'link';
+  sheets: Array<{hash: string; url: string; bytes: number; links: number}>;  // distinct linked texts, order of first
+                                       // use (= the order of RenderSpectrumResult.head)
+  links: number;                       // <link> elements in the output
+  linkedBytes: number;                 // UTF-8 bytes of the distinct linked texts (fetched once, cacheable)
+  inlineBytes: number;                 // UTF-8 bytes of the CSS that stayed inline, every copy counted
 }
 ```
 
@@ -293,9 +389,11 @@ parsed once and every stylesheet (element tag + stylesheet object) is resolved a
   strings and comments (`content: "var(--mod-x, y)"`).
 * `minifyCustomProperties`: custom properties of the trimmed stylesheets are renamed to short names (`--a` ... `--z`,
   `--A` ... `--Z`, `--aa`, ..., most used first) consistently across the page - but only names the client can switch
-  in one step: names that only the theme defines (the client bridges the theme's server `<style>`), and names whose
-  every definition and use is inside the stylesheets of one element class or inside one stylesheet several classes
-  share. Never renamed:
+  in one step: names that only the theme defines and no element class's complete stylesheet defines (the client
+  bridges the theme's server `<style>`), and names whose every definition and use is inside the stylesheets of one
+  element class or inside one stylesheet several classes share. Ownership is judged on the trimmed texts AND on the
+  complete stylesheets of every element class on the page (since 0.2.2): the client restores complete sheets, and a
+  rule the trimmer dropped from a child's sheet may read a name only its parent defines. Never renamed:
   * Spectrum's public customisation names `--mod-*`, `--highcontrast-*` and `--system-*`, whatever the options: an
     application sets them (`sp-action-button { --mod-actionbutton-background-color-default: red }`) and reads them,
     and the components define many of them too (kept rules defined 253 `--mod-*` names on the catalog), so 0.2.0,
@@ -304,6 +402,11 @@ parsed once and every stylesheet (element tag + stylesheet object) is resolved a
     `sp-menu-group` -> `sp-menu-item`, `sp-picker` -> `sp-popover`, `sp-number-field` -> `sp-infield-button`,
     `sp-tray` -> `sp-dialog-wrapper`): a child that is defined or hydrates after its parent was restored would read
     a short name nothing defines any more;
+  * names another element class's complete stylesheet mentions (0.2.2; e.g. `sp-menu` -> `sp-menu-item`'s disabled
+    icon colour `--spectrum-menu-item-label-icon-color-disabled`, `sp-breadcrumbs` -> `sp-breadcrumb-item`'s disabled
+    text colour, `sp-table` -> `active` head cells / `drop-target` rows): 0.2.1 judged from the trimmed texts only,
+    and a child restored while its parent was defined late read the original name while the parent defined only the
+    short one;
   * `references` names and prefixes, names that occur in a `style` attribute or in CSS the trimmer does not control
     (other `<style>` elements, stylesheets left complete), and names that are only read (`var(--x)` with no
     definition on the page: the application may define them).
@@ -316,10 +419,62 @@ parsed once and every stylesheet (element tag + stylesheet object) is resolved a
 
 **Markers.** Every `<style>` whose text the trimmer changed carries `data-swc-styles="trimmed"`, or `"minified"` when
 names in it were renamed (wins when one `<style>` holds several stylesheets). Full mode, stylesheets that came out
-complete, stylesheets left complete and the fallback carry no attribute. `report.styles.sheets[].id` is
+complete, stylesheets left complete and the fallback carry no attribute on a `<style>`; with `dedupe: 'link'` every
+`<link>` is marked, a complete one `"complete"`. `report.styles.sheets[].id` is
 `<tag>:<index in elementStyles>` or `<tag>:<kind>/<name>` for theme fragments (`sp-theme:color/light`), `#<n>`
 appended to a repeated id; `instances` is the number of shadow roots carrying the sheet; the per-sheet sizes are the
 UTF-8 bytes of one copy.
+
+**De-duplication (`dedupe: 'link'`, 0.3.0, opt-in).** Without it every shadow root carries its own `<style>` copy of its
+class's stylesheets (the button page: 21 copies of one 36 KB `sp-button` sheet; the catalog: 1346 shadow roots, about
+0.6-1.9 MB of distinct CSS repeated into 8-18 MB). Declarative shadow DOM has no way to share a sheet between roots
+without JavaScript except the HTTP cache, so with `'link'`:
+
+* every distinct stylesheet text (after trimming / minification; the complete `cssText` in `full` mode, where nothing is
+  parsed, only counted) is put into the process-wide `styleSheetStore` under `styleSheetHash(text)`, and each shadow
+  root gets `<link rel="stylesheet" href="<dedupeUrl(hash, text)>" data-swc-styles="trimmed|minified|complete">` in the
+  sheet's place - in the `elementStyles` order, so `<style>A B C</style>` with B linked becomes
+  `<style>A</style><link B><style>C</style>` and the cascade order is unchanged. `'complete'` marks a linked sheet
+  nothing was taken from (it never occurs on a `<style>`);
+* stays inline: minified theme sheets (the client's theme bridge must move them back as `<style>` elements; a
+  re-inserted `<link>` would be processed again), sheets under 160 bytes (a `<link>` is about 90), and sheets with a
+  relative `url()` / `@import` or a quoted relative URL in `image-set()` / `-webkit-image-set()` / `src()` (a linked
+  sheet resolves them against its own URL). Fragment-only references
+  (`url(#checkerboard-primary)` of the theme) are document-local in every stylesheet and are linked (an open
+  `sp-color-loupe` renders identically, Chromium and Firefox);
+* `RenderSpectrumResult.head` is one `<link rel="preload" href="..." as="style">` per distinct URL in order of first use:
+  put it into the page's `<head>` so all downloads start before the parser reaches the shadow roots.
+  `styleHeadOf(report.styles, 'stylesheet-not-all')` gives `<link rel="stylesheet" media="not all">` instead (measured:
+  no difference in Chromium, whose preload scanner already finds the links inside the declarative templates; the hint
+  only matters for streamed responses). The texts cannot be announced as document stylesheets: their rules (`#input`,
+  `.icon`, `input`) would match the light DOM;
+* the application serves the store: `GET <path>/<hash>.css` -> `getStyleSheet(hash)` as `text/css; charset=utf-8` with
+  `Cache-Control: public, max-age=31536000, immutable` (a hash names one text for ever), and `404` with `no-store` for
+  an unknown hash (demo: `demo/src/styles-routes.ts`, which also compresses each text once and answers GET, HEAD and
+  304 with the same `Content-Encoding` / `ETag` / `Vary`). The store is per process and an LRU (`maxBytes`, 32 MiB by
+  default) that does not evict a text for `minLifetimeMs` (60 s) after a render last put it, so the pages just served
+  can still fetch their sheets (above twice the budget the oldest go anyway; `evictions` / `freshEvictions` count
+  them): behind a load balancer without sticky sessions, or after an eviction, a URL can 404 - Chromium then parses on
+  without the sheet and the elements stay unstyled until they hydrate (the client restores the complete sheets). For
+  several instances, write the texts to shared storage from `dedupeUrl` (it receives every text) and serve them from
+  there. A `dedupeUrl` that throws for a text keeps that text inline (trimmed) and adds a `#render` warning
+  `StyleOptions.dedupeUrl threw for stylesheet <hash> ...`; the rest of the page is linked as usual;
+* `swc-ssr/client` treats a server `<link data-swc-styles>` like a marked `<style>` (restored, removed, minified ones
+  kept until settled, counted for the theme bridge); a theme `<link>` is never bridged (only minified theme sheets need
+  the bridge, and those stay inline), and `'complete'` does not count for the theme-pending warning. Without
+  constructable stylesheets a `<style>` with the complete text takes the first link's place.
+
+Trade-off (measured, docs/DESIGN.md "Style de-duplication"): **Chromium** waits in the parser at a pending shadow-root
+`<link rel="stylesheet">`, as at an in-body one: it never painted content without its CSS (0 unstyled frames on
+button and catalog, local to slow 3G, cold and warm cache, with and without hints and client), but a cold load renders
+progressively and its DOMContentLoaded waits for the sheets that are not cached yet (trimmed button page, 150 ms
+round trip: 178 ms inline, 493 ms linked cold, 187 ms warm). **Firefox** (157) does not wait: it paints content
+without its sheet until the sheet arrives - for the whole download on a cold load, and for 2-9 frames even from a
+warm cache - and CSS transitions then run from the unstyled values (an `sp-button` is a transparent 45x18 px block,
+then fades in its background). WebKit was not measured. That is why `dedupe` is off by default. It pays where the same
+sheets repeat across pages and the cache is warm (`full` + `'link'`: 94 % of the CSS of the 59 catalog pages is
+shared; trimmed 14 %, minified 2 %, since their texts are page-specific) and in browsers that wait for the link. With
+compression on the wire the inline page is already small (brotli's window spans the repeated sheets; table below).
 
 `scanCustomPropertyReferences(text)` returns every custom-property name used through `var()` in a CSS or JavaScript
 text, fallbacks included, in order of first appearance: `references: scanCustomPropertyReferences(appCss)`.
@@ -346,7 +501,9 @@ differing pixels, the buttons lose their background and shrink from 32 to 22.8 p
   (before the next paint) and removed when the last marked `<style>` in the document is gone (confirmed by a scan), or
   at the end of `hydrateSpectrum()` when none is left - but only from themes that have upgraded. A theme whose
   definition loads after the components hydrated, or never, keeps its server `<style>` where the server put it (it
-  is all that theme has; its upgrade clears it anyway). Elements not hydrated yet - an application that calls
+  is all that theme has; its upgrade clears it anyway). `hydrateSpectrum()` reports such a theme:
+  `HydrationReport.warnings` gets `theme pending: sp-theme not defined; trimmed/minified theme values incomplete (...)`
+  (since 0.2.2). Elements not hydrated yet - an application that calls
   `hydrateSpectrum()` late (an Angular bootstrap), elements that hydrate lazily or are defined late - keep their theme
   values meanwhile. It is a `<style>` element, not an adopted sheet, because `Theme.adoptStyles()` re-assigns
   `adoptedStyleSheets` whenever a theme fragment is registered; it does not depend on constructable stylesheets.
@@ -388,6 +545,23 @@ differing pixels, the buttons lose their background and shrink from 32 to 22.8 p
   prefixes the application does define (e.g. `--mod-*` overrides in its CSS).
 * **Theme switches before hydration** (changing `color` / `scale` of `<sp-theme>` while elements still run on minified
   CSS): the bridged server theme keeps the server's values for the renamed names until each element hydrates.
+* **`sp-theme` defined late, or never** (a lazily loaded theme chunk, an app that never defines it): until it upgrades,
+  the theme's server `<style>` holds only what the server kept - the theme properties the rendered markup used
+  (`trimTheme`), under the short names (`minifyCustomProperties`). Content the client creates meanwhile (an
+  `sp-table`'s checkbox cells, a pending button's progress circle, overlays), states entered after hydration and
+  restored elements that read pruned or renamed names find no theme values until `sp-theme` is defined (measured,
+  table page with `?late=sp-theme`: 8,139 px trimmed / 106,988 px minified differ from full while it is missing, 0 px
+  after the definition). `trimTheme` and `minifyCustomProperties` assume that `sp-theme` is defined before client-side
+  changes; otherwise use `trimTheme: false` and no minification. `hydrateSpectrum()` reports the situation as a
+  warning starting with `theme pending: sp-theme not defined; trimmed/minified theme values incomplete`.
+* **Definition order on the client** (code-split bundles): define `sp-theme` after the theme fragments it uses
+  (`theme-light`, `scale-medium`, ...) - its constructor's `attachShadow()` empties the declarative shadow root, and
+  without registered fragments nothing replaces the server's theme `<style>` (with `full` CSS too: an unthemed frame,
+  CLS 0.012-0.032 measured on the menu / badge pages) - and parents before their children (`sp-sidenav` before
+  `sp-sidenav-item`: the reverse throws `startTrackingSelectionForItem is not a function` in about 15 % of loads;
+  combobox / sidenav items ended with roving `tabindex="-1"` when their definitions arrived in different tasks).
+  Define one page area's elements in one task, in dependency order (the demo's per-entry registration modules,
+  docs/DESIGN.md "Demo build"); do not let the order of parallel `import()` chunks decide it.
 * **A build-time custom-property renamer** (an "unused CSS" / minifier step over the built bundle, e.g. a custom builder
   that collects `var()` references, deletes unreferenced declarations and renames custom properties) must process the
   SSR SERVER bundle (the code `renderSpectrum()` runs) exactly like the client bundle, or be disabled while swc-ssr
@@ -410,21 +584,41 @@ vary with machine load, see docs/DESIGN.md "Style trimming"):
 | | minified (0.2.0: 0.31 MB, 298 KB, 13 KB gzip) | 0.47 MB | 454 KB | 46 KB | 15 KB | 9 ms |
 | `/component/picker` | full | 1.32 MB | 1294 KB (95.9 %) | 392 KB | 117 KB | - |
 | | trimmed | 0.52 MB | 475 KB | 54 KB | 56 KB | 16 ms |
-| | minified (0.2.0: 0.28 MB, 231 KB, 24 KB gzip) | 0.38 MB | 330 KB | 32 KB | 43 KB | 19 ms |
+| | minified (0.2.0: 0.28 MB, 231 KB, 24 KB gzip) | 0.39 MB | 346 KB | 34 KB | 45 KB | 19 ms |
 | `/` (59 entries, 1349 elements) | full | 18.66 MB | 18121 KB (94.9 %) | 1937 KB | 1488 KB | - |
 | | trimmed | 13.31 MB | 12616 KB (69.6 % of full) | 997 KB | 996 KB | 0.4-0.6 s |
-| | minified (0.2.0: 6.55 MB, 5689 KB = 31.4 %, 486 KB gzip) | 9.03 MB | 8224 KB (45.4 %) | 613 KB | 640 KB | 0.4 s |
-| | minified + `undefinedPrefixes: ['--mod-']` (0.2.0: 5.22 MB, 4329 KB = 23.9 %) | 7.70 MB | 6864 KB (37.9 %) | 530 KB | 545 KB | 0.4 s |
+| | minified (0.2.0: 6.55 MB, 5689 KB = 31.4 %, 486 KB gzip) | 9.10 MB | 8305 KB (45.8 %) | 619 KB | 643 KB | 0.3-0.4 s |
+| | minified + `undefinedPrefixes: ['--mod-']` (0.2.0: 5.22 MB, 4329 KB = 23.9 %) | 7.78 MB | 6945 KB (38.3 %) | 536 KB | 550 KB | 0.3-0.4 s |
 
 The button page renders every variant of `sp-button`, so its two `sp-button` sheets keep 36.6 KB of 41 KB trimmed
 (19.9 KB minified; 12.9 KB in 0.2.0, which also renamed the `--system-*` / `--highcontrast-*` / `--mod-*` names),
 while its theme goes from 312 KB to 20.4 KB (about 5 KB minified). One-component pages of the
 catalog keep 3-67 % of their CSS (sum over the 59 entry pages: see `tests/results/summary.md`, "Styles").
 
+On the wire (the demo, KiB; `.probe/integrate/wire.ts`; the linked CSS fetched once per distinct URL, compressed like
+every response; docs/DESIGN.md "Performance" has every mode):
+
+| Page | Mode | HTML | HTML gzip | HTML brotli | linked CSS (brotli) | cold load, brotli | repeat visit, brotli |
+|---|---|---|---|---|---|---|---|
+| `/component/button` | full | 1252.6 | 120.5 | 43.7 | - | 43.7 | 43.7 |
+| | trimmed | 846.6 | 80.0 | 12.0 | - | 12.0 | 12.0 |
+| | minified | 477.8 | 15.4 | 10.4 | - | 10.4 | 10.4 |
+| | trimmed + `dedupe: 'link'` | 28.4 | 3.2 | 3.0 | 77.0 (12.1), 12 sheets | 15.2 | 3.0 |
+| `/component/picker` | trimmed | 538.9 | 57.3 | 13.2 | - | 13.2 | 13.2 |
+| | trimmed + `dedupe: 'link'` | 66.6 | 5.0 | 4.8 | 59.4 (12.0), 13 sheets | 16.8 | 4.8 |
+| `/` | full | 19105.7 | 1488.7 | 255.4 | - | 255.4 | 255.4 |
+| | trimmed | 13632.5 | 997.2 | 179.5 | - | 179.5 | 179.5 |
+| | minified | 9323.9 | 643.6 | 156.0 | - | 156.0 | 156.0 |
+| | trimmed + `dedupe: 'link'` | 1169.9 | 88.2 | 62.3 | 822.9 (138.8), 122 sheets | 201.1 | 62.3 |
+| | full + `dedupe: 'link'` | 1164.5 | 87.0 | 61.5 | 1170.0 (160.7), 101 sheets | 222.1 | 61.5 |
+
 `ServerTree` (internal, `packages/swc-ssr/src/server/server-tree.ts`): parse5 (htmlparser2 adapter) document of the pass-1
 HTML with lookup `byId(id)`, `lightChildren(id)`, `shadowRoot(id)`, `query(node, selector)`, `queryAll(node, selector)` via `css-select`,
 `documentLanguage()` (whole documents: the `<html lang>`), and `lightSignature(node)` (child tags with `slot`, text hash;
-used to verify adoptions and to locate light-DOM attribute changes).
+used to verify adoptions and to locate light-DOM attribute changes). Since 0.3.0: `new ServerTree(html, {locations})`
+records parse5 source locations (`hasLocations`; `sourceOffset(offset)` maps a parsed offset back to the original
+HTML across the replaced `<style>` bodies), and `contentHash` is the FNV-1a hash of the parsed text (the next pass's
+id seed, see "Deterministic ids").
 
 ## `swc-ssr/client`  (`packages/swc-ssr/src/client/index.ts`)
 
@@ -433,7 +627,8 @@ Must be the FIRST import of the client bundle (before `lit` and before any `@spe
 ```ts
 export interface HydrationReport {
   errors: string[];        // console.error / uncaught errors captured during hydration
-  warnings: string[];      // console.warn captured during hydration
+  warnings: string[];      // console.warn captured during hydration, definition / settle timeouts, and
+                           // `theme pending: ...` (a trimmed / minified theme that has not upgraded, "Styles")
   deferred: string[];      // tag names of elements that still carry defer-hydration after hydration
   hydratedCount: number;   // number of hydration candidates (custom elements: sp-* and others such as
                            // <overlay-trigger>) that have a (declarative) shadow root, are upgraded and not deferred
@@ -488,11 +683,25 @@ adapter for every hydrating element that has `MatchMediaController`s - `sp-picke
 `sp-contextual-help`, subclasses registered under other tags, application components - and, since 0.2.0, a
 `Menu` adapter for every element built on `menu/src/Menu.js` that breaks the `updateCache()` / `getUpdateComplete()`
 cycle a menu hydrated more than a frame after its items were defined got stuck in, so `hydrateSpectrum()` may run any
-time after the definitions load), importing `swc-ssr/client` installs two generic
+time after the definitions load, and, since 0.3.0, a measured-layout adapter for `sp-color-area` / `sp-color-wheel` and
+their subclasses, see below), importing `swc-ssr/client` installs two generic
 hooks on every Lit element whose pre-existing shadow root was rendered by `@lit-labs/ssr` (it contains a `<!--lit-part`
 marker) or whose tag starts with `sp-`: the initial `slotchange` (which declarative shadow roots never receive) is
 emulated like the server does, and a hydration mismatch is recovered from by re-rendering that element on the client
 (reported via `console.error`). Other Lit elements with a declarative shadow root are left to lit's own hydrate support.
+
+The measured-layout adapter (0.3.0 review): `sp-color-area` positions its handle (`style="transform: translate()"`)
+and `sp-color-wheel` its track and handle from a measurement of itself (`boundingClientRect`), which their own
+`connectedCallback()` starts with a ResizeObserver at the upgrade - while the element still carries
+`defer-hydration`. When a rendering opportunity passes between the definition and the hydrating update (definitions
+in several chunks, `hydrateSpectrum()` called later, `?hydrateDelay=`), the hydrating render used the measurement, and
+lit's `hydrate()` primes attribute bindings with their first client value without writing them: the DOM kept the
+server's unmeasured `translate(0px, 0px)` and the handle stayed in the corner until the color changed (the demo
+catalog with the code-split bundle: 11 of 14 loads). The adapter (by shape: `getContentBoundingRect()` /
+`cacheLayoutData()`) hides the measurement for the hydrating render, gives it back right after it and requests one
+more update, which writes the measured layout at once (also when nothing was measured before hydration: no unmeasured
+frame after hydration). Application components that render from a measurement taken before their first update need
+the same treatment (a hydration adapter): lit's hydration never writes attribute values.
 
 The `MatchMediaController` adapter: the server's `matchMedia()` never matches, so the server renders the desktop state
 (popover, no `mobile-view`). `beforeHydrate` pins every controller's `matches` to that server value; `afterHydrate`
@@ -539,17 +748,30 @@ The exported entries' `load()` also registers `sp-theme` with the light/medium f
 | `GET /report.json` | the `RenderReport` of the last SSR render (+ `loadErrors`; `styles` in trimmed / minified mode); `?component=<name>` (or `*` for `/`) returns the last report of that page |
 | `?styles=full\|trimmed\|minified` on every SSR route | `renderSpectrum({styles})`: `full` (default), `trimmed` = `{mode: 'trimmed'}`, `minified` = `{mode: 'trimmed', minifyCustomProperties: true}`; anything else is answered with 400 |
 | `?refs=--a,--b,--prefix-*` on every SSR route | `StyleOptions.references` (comma separated, may repeat); a value that is not a custom-property name or prefix is answered with 400 |
-| `GET /styles.json?component=<name\|*>&styles=<mode>&refs=...` | renders the page on demand (leaves `/report.json` alone) and returns `{component, styles, reported, fullBytes, trimmedBytes, cssBytes, htmlBytes, gzipBytes, sheets, durationMs, elements}`: `report.styles` values plus the measured `<style>` text, document and gzip sizes |
+| `?dedupe=none\|link` on every SSR route and `/styles.json` (0.3.0) | `link`: `StyleOptions.dedupe: 'link'` in any `?styles=` mode, and the page's `<head>` gets the render's stylesheet hints; `none` / absent: inline; anything else is answered with 400 |
+| `?hints=preload\|not-all\|none` with `?dedupe=link` | what `<head>` announces: `result.head` (preload, default), `<link rel="stylesheet" media="not all">`, or nothing (a measurement knob) |
+| `GET /swc-css/<hash>.css` (and `HEAD`) | a stylesheet a `?dedupe=link` render linked (`getStyleSheet`): `text/css; charset=utf-8`, `Cache-Control: public, max-age=31536000, immutable`, brotli (q4) / gzip computed once per hash (texts of 1 KB or more), `Content-Encoding` / `Content-Length` / one `ETag` per coding / `Vary: Accept-Encoding` the same for GET and HEAD, `If-None-Match` answered with 304 (with `Vary`); mounted before the compression middleware; an unknown hash is a 404 with `no-store`. Successful answers are not in the request log |
+| `GET /styles.json?component=<name\|*>&styles=<mode>&refs=...&dedupe=...` | renders the page on demand (leaves `/report.json` alone) and returns `{component, styles, reported, fullBytes, trimmedBytes, cssBytes, htmlBytes, gzipBytes, sheets, dedupe, durationMs, elements}`: `report.styles` values plus the measured `<style>` text, document and gzip sizes (`gzipBytes` is computed on the uncompressed document, whatever the response's own `Content-Encoding`); `dedupe` is `report.styles.dedupe` (or null), `sheets[].hash` the linked text of a sheet, and `cssBytes` then counts only the CSS left inline |
 | `GET /catalog.json` | `[{name, interactive, notes}]` |
 | `?agnostic=1` on an SSR route | hydrate without the template (framework-agnostic path) |
 | `?lang=<BCP 47 tag>` on SSR and CSR routes | page language; otherwise the request's most preferred `Accept-Language` language (`*` ignored, canonicalized with `Intl.getCanonicalLocales`), otherwise `en`. Passed to `renderSpectrum({lang})` and written to `<html lang>` |
-| `HEAD` on any path except `/dist/*` | 200 with an empty body, never renders; not in the request log (the first HEAD gets its own line, later ones a per-minute count) |
-| `HEAD /dist/*` | like `GET` without the body (static handler): the file's `Content-Type` / `Content-Length`, 404 for a missing file |
-| `GET /dist/*` | static from `demo/public/dist` |
+| `HEAD` on any path except `/dist/*` and `/swc-css/*` | 200 with an empty body, never renders; not in the request log (the first HEAD gets its own line, later ones a per-minute count) |
+| `HEAD /dist/*`, `HEAD /swc-css/*` | like `GET` without the body: the file's `Content-Type` / `Content-Length` (and `Content-Encoding` of a precompressed sibling), 404 for a missing file |
+| `GET /dist/*` | static from `demo/public/dist` (`SWC_SSR_DEMO_DIST` overrides the directory). Serves the build's precompressed `<file>.br` / `<file>.gz` with `Content-Encoding` to clients that accept them (the plain file is the identity answer, `Content-Type` of the original either way); `/dist/chunks/*` are `Cache-Control: public, max-age=31536000, immutable` (content-hashed names), `client.js` and its map `no-cache` (revalidated with their ETag) |
+
+Compression (0.3.0): every other compressible response (HTML, JSON, the `/swc-css/` stylesheets) is compressed on the
+fly for clients that accept it - brotli quality 4 preferred over gzip (the client's q-values are honoured), nothing
+under 1 KB, `Vary: Accept-Encoding` always. Brotli's window spans the stylesheets every shadow root repeats, gzip's
+32 KB window does not (button page, `full`: 1253 KB identity, 121 KB gzip, 44 KB brotli).
 
 The demo renders with `renderSpectrum(pageTemplate(entries), {deferHydration: true, lang, styles})` (`styles` from
-`?styles=` / `?refs=`). The request log line of an SSR route ends with `styles <mode> <trimmed>/<full> KB`.
+`?styles=` / `?refs=` / `?dedupe=`). The request log line of an SSR route ends with
+`styles <mode> <trimmed>/<full> KB` (with `?dedupe=link` also `, linked <n> sheets <KB> KB (<links> links)`).
 
-Page shell: `<!doctype html><html lang="<page language>"><head><meta charset="utf-8"><title>…</title><style>/* layout only */</style></head><body><div id="app">…</div><script type="module" src="/dist/client.js"></script></body></html>`.
+Page shell: `<!doctype html><html lang="<page language>"><head><meta charset="utf-8"><meta name="viewport" …><title>…</title><link rel="icon" href="data:,">[stylesheet hints with ?dedupe=link]<style>/* layout only */</style></head><body><div id="app">…</div><script type="module" src="/dist/client.js"></script></body></html>`.
+`/dist/client.js` is a 1.2 KB bootstrap (0.3.0): it imports `swc-ssr/client` (its static graph: `swc-ssr/client`, Lit's
+hydrate support, nothing of `lit-element` or Spectrum), sets `window.__swcSsrHydration`, `__swcSsrMode`,
+`__swcSsrReport` and `__swcSsrDefineLate` synchronously and loads the application (`client-app.ts`, which sets
+`__swcSsrDefined` and `__swcSsrRelease`) and the page's catalog entries from `/dist/chunks/*.js` with `import()`.
 The SSR'd content inside `#app` is `pageTemplate(entries)` = `<sp-theme system="spectrum" color="light" scale="medium">` + one `<section class="demo" data-component="<name>"><h2>…</h2>…render()…</section>` per entry.
 The client reads `data-mode` and `data-components` attributes on `#app` to know what to hydrate/render.

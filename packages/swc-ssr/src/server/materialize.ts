@@ -34,6 +34,8 @@ import {noChange, nothing} from 'lit';
 import {reflectedAttributeName} from '@lit-labs/ssr/lib/reflected-attributes.js';
 import {ShimNode, serializeNode} from '../dom-shim/nodes.js';
 import {getCurrentRenderContext, timerDelay} from './context.js';
+import {MARKER_ATTRIBUTE} from './server-tree.js';
+import {applyEdits, orderedEdits, type Edit} from './light-mutations.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -389,7 +391,6 @@ export function materialize(value: unknown, depth = 0): unknown {
   return changed ? {...candidate, strings, values} : value;
 }
 
-const RAW_REGION = /<!--swc-raw-->([\s\S]*?)<!--\/swc-raw-->/g;
 const TEMPLATE_TOKEN = /<template\b[^>]*>|<\/template>/gi;
 
 /** Removes template-level hydration markers and `defer-hydration` from one raw region (outside nested templates). */
@@ -420,12 +421,132 @@ function stripRegion(region: string): string {
 }
 
 /**
- * Post-processes the final HTML of a render: raw DOM-node regions (see `materialize`) lose their template-level
- * hydration markers and their delimiting comments.
+ * Whether `edit` touches one of `regions` (raw regions in page order, disjoint) or its delimiting comments: a binary
+ * search for the last region that opens before the edit ends (the one that closes last among those that could).
  */
-export function finalizeHtml(html: string): string {
-  if (!html.includes(RAW_OPEN)) {
+function touchesRegion(regions: ReadonlyArray<{open: number; close: number}>, edit: Edit): boolean {
+  let low = 0;
+  let high = regions.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (regions[middle].open < edit.end) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  return low > 0 && edit.start < regions[low - 1].close + RAW_CLOSE.length;
+}
+
+/** The `data-swc-ssr` marker attributes of a pass output (left out of the final HTML unless `debug`). */
+const MARKER_RE = new RegExp(` ${MARKER_ATTRIBUTE}="\\d+"`, 'g');
+/** The same, for scanning with `lastIndex`. */
+const MARKER_SCAN = new RegExp(MARKER_RE.source, 'g');
+
+/**
+ * Post-processes the final HTML of a render: raw DOM-node regions (see `materialize`) lose their template-level
+ * hydration markers and their delimiting comments; with `stripMarkers` the `data-swc-ssr` markers are left out;
+ * `edits` (light-DOM attribute changes, see light-mutations.ts `lightMutationEdits`) are applied first.
+ *
+ * The result is what `applyEdits(html, edits)`, then `.replace(MARKER_RE, '')` (when `stripMarkers`), then
+ * `.replace(/<!--swc-raw-->([\s\S]*?)<!--\/swc-raw-->/g, (_, region) => stripRegion(region))` gives, built in one
+ * pass with `indexOf` / a marker scan (render speed: on the full-catalog page, 19.5 M characters, these took three
+ * copies of the page). Every opening comment counts up to the first closing one after it; an opening comment without
+ * a closing one after it (and so every later one) stays as it is. Markers never overlap the comments (an attribute
+ * vs. a comment) or an edit (attributes of other elements, or other attributes of the same start tag), so leaving
+ * them out first or while copying gives the same regions. Edits whose text could form a marker or a comment, that
+ * touch a raw region or overlap a marker are applied separately first (the general path).
+ */
+export function finalizeHtml(html: string, stripMarkers = false, edits: readonly Edit[] = []): string {
+  const regions: Array<{open: number; close: number}> = [];
+  for (let open = html.indexOf(RAW_OPEN); open !== -1; ) {
+    const close = html.indexOf(RAW_CLOSE, open + RAW_OPEN.length);
+    if (close === -1) {
+      break;
+    }
+    regions.push({open, close});
+    open = html.indexOf(RAW_OPEN, close + RAW_CLOSE.length);
+  }
+  if (!stripMarkers && regions.length === 0 && edits.length === 0) {
     return html;
   }
-  return html.replace(RAW_REGION, (_match, region: string) => stripRegion(region));
+  const order = edits.length === 0 ? [] : orderedEdits(edits);
+  const near = MARKER_ATTRIBUTE.length + 24;
+  const separate =
+    order === undefined ||
+    order.some(
+      (edit) =>
+        edit.text.includes('<!--') ||
+        edit.text.includes(MARKER_ATTRIBUTE) ||
+        // (A marker next to the edit, or one the edit could complete.)
+        html.slice(Math.max(0, edit.start - near), edit.end + near).includes(MARKER_ATTRIBUTE) ||
+        touchesRegion(regions, edit)
+    );
+  if (separate) {
+    return finalizeHtml(applyEdits(html, edits), stripMarkers);
+  }
+  const parts: string[] = [];
+  let next = 0;
+  // The first marker at or after `markerFrom` (`null`: none up to the end of the page), kept across `copy` calls:
+  // positions only grow, so the page is scanned once. (Scanning again from every region boundary made a page with
+  // many raw regions after its last marker quadratic: 5,000 regions took seconds.)
+  let nextMarker: RegExpExecArray | null = null;
+  let markerFrom = -1;
+  const markerAt = (at: number): RegExpExecArray | null => {
+    if (markerFrom === -1 || at < markerFrom || (nextMarker !== null && nextMarker.index < at)) {
+      MARKER_SCAN.lastIndex = at;
+      nextMarker = MARKER_SCAN.exec(html);
+      markerFrom = at;
+    }
+    return nextMarker;
+  };
+  /** Copies `html` from `from` to `to`: edits applied, markers left out when `stripMarkers`. */
+  const copy = (from: number, to: number): boolean => {
+    let position = from;
+    let marker: RegExpExecArray | null = null;
+    const scan = (at: number): void => {
+      if (stripMarkers) {
+        const found = markerAt(at);
+        marker = found !== null && found.index < to ? found : null;
+      }
+    };
+    scan(position);
+    for (;;) {
+      const edit = next < order.length && order[next].start < to ? order[next] : undefined;
+      const current = marker as RegExpExecArray | null;
+      if (current === null && edit === undefined) {
+        break;
+      }
+      if (current !== null && (edit === undefined || current.index < edit.start)) {
+        if (edit !== undefined && current.index + current[0].length > edit.start) {
+          return false;
+        }
+        parts.push(html.slice(position, current.index));
+        position = current.index + current[0].length;
+        scan(position);
+      } else if (edit !== undefined) {
+        if (current !== null && current.index < Math.max(edit.end, edit.start + 1)) {
+          return false;
+        }
+        parts.push(html.slice(position, edit.start), edit.text);
+        position = edit.end;
+        next++;
+      }
+    }
+    parts.push(html.slice(position, to));
+    return true;
+  };
+  let copied = 0;
+  for (const {open, close} of regions) {
+    if (!copy(copied, open)) {
+      return finalizeHtml(applyEdits(html, edits), stripMarkers);
+    }
+    const region = html.slice(open + RAW_OPEN.length, close);
+    parts.push(stripRegion(stripMarkers ? region.replace(MARKER_RE, '') : region));
+    copied = close + RAW_CLOSE.length;
+  }
+  if (!copy(copied, html.length)) {
+    return finalizeHtml(applyEdits(html, edits), stripMarkers);
+  }
+  return parts.join('');
 }

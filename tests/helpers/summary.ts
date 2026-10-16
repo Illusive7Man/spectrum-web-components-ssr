@@ -442,6 +442,71 @@ function stylesSection(rows: Row[], pageRow: Row | undefined): string[] {
   return lines;
 }
 
+/** The checks of tests/styles-dedupe.spec.ts (`StyleOptions.dedupe: 'link'`). */
+const DEDUPE_CHECKS: CheckName[] = ['styles-dedupe', 'styles-dedupe-post', 'styles-dedupe-paint'];
+
+/**
+ * The "Style de-duplication" section (tests/styles-dedupe.spec.ts): outcomes per component, the page sizes inline vs
+ * linked, and the first-frame timings of the paint check. Empty when the spec did not run.
+ */
+function dedupeSection(rows: Row[]): string[] {
+  const dedupeRows = rows.filter((row) => DEDUPE_CHECKS.some((check) => row.checks[check]));
+  if (dedupeRows.length === 0) return [];
+  const green = dedupeRows.filter((row) => DEDUPE_CHECKS.every((check) => row.checks[check]?.status !== 'fail')).length;
+  const lines: string[] = [];
+  lines.push("## Style de-duplication (optional `dedupe: 'link'`, tests/styles-dedupe.spec.ts)");
+  lines.push('');
+  lines.push(`- **${green}/${dedupeRows.length} components green**`);
+  lines.push(
+    '- Static = no client (`nohydrate=1`, both pages repainted once), `?styles=full|trimmed|minified&dedupe=link` equals `?styles=full` (0 px); every server link loaded; ' +
+      'the head preloads exactly the linked URLs; every URL is `text/css`, `immutable`. Post = hydrated (normal timing, then the ' +
+      'state groups) and held / released linked pages equal full (0 px); no server link or marked style left; every hydrated sp-* ' +
+      'Lit element on adopted sheets. Paint = first frames over an emulated 150 ms round trip, cold and warm cache, with and ' +
+      'without head hints, without and with the client: no frame paints content without its sheet (Chromium).',
+  );
+  lines.push('');
+  lines.push(
+    '| Component | Static | Post | Paint | html KiB trimmed: inline -> link | linked CSS KiB (sheets / links) | cold DCL ms trimmed: inline -> link (preload / none) | warm DCL ms | Notes |',
+  );
+  lines.push('|---|---|---|---|---|---|---|---|---|');
+  for (const row of dedupeRows) {
+    const s = row.checks['styles-dedupe']?.metrics;
+    const p = row.checks['styles-dedupe-paint']?.metrics;
+    const html =
+      s && num(s.html_trimmed) !== undefined && num(s.htmlLink_trimmed) !== undefined
+        ? `${kb(num(s.html_trimmed)!)} -> ${kb(num(s.htmlLink_trimmed)!)}`
+        : '-';
+    const css =
+      s && num(s.linkedCss_trimmed) !== undefined ? `${kb(num(s.linkedCss_trimmed)!)} (${s.sheets_trimmed} / ${s.links_trimmed})` : '-';
+    const ms = (value: unknown): string => (num(value) === undefined ? '-' : String(num(value)));
+    const cold = p ? `${ms(p.trimmed_inline_dcl)} -> ${ms(p.trimmed_preload_nojs_cold_dcl)} / ${ms(p.trimmed_none_nojs_cold_dcl)}` : '-';
+    const warm = p ? `${ms(p.trimmed_preload_nojs_warm_dcl)} / ${ms(p.trimmed_none_nojs_warm_dcl)}` : '-';
+    const notes = DEDUPE_CHECKS.map((check) => row.checks[check])
+      .filter((rec): rec is ResultRecord => rec !== undefined && rec.note !== undefined)
+      .map((rec) => `${rec.check.slice('styles-'.length)}: ${truncate(rec.note!, 200)}`)
+      .join('; ');
+    lines.push(
+      '| ' +
+        [
+          row.component,
+          styleStatus(row, 'styles-dedupe'),
+          styleStatus(row, 'styles-dedupe-post'),
+          styleStatus(row, 'styles-dedupe-paint'),
+          html,
+          css,
+          cold,
+          warm,
+          notes,
+        ]
+          .map(cell)
+          .join(' | ') +
+        ' |',
+    );
+  }
+  lines.push('');
+  return lines;
+}
+
 export interface SummaryOptions {
   /** The run covered only part of the catalog (`SWC_SSR_COMPONENTS=...`): stated at the top of the partial summary. */
   narrowedBy?: string;
@@ -511,6 +576,7 @@ export function buildSummary(records: ResultRecord[], now: Date = new Date(), op
   if (rows.length === 0) lines.push('| _no results recorded_ | | | | | | | | |');
   lines.push('');
   lines.push(...stylesSection(rows, stylesPageRow));
+  lines.push(...dedupeSection(rows));
   if (pageRows.length > 0) {
     lines.push('## Pages');
     lines.push('');

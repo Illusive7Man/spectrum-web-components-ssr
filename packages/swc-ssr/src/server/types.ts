@@ -119,23 +119,67 @@ export interface StyleOptions {
   minifyCustomProperties?: boolean;
   /** Selectors (substring of, or RegExp tested against, a rule's selector text) whose rules are always kept. */
   keep?: ReadonlyArray<string | RegExp>;
+  /**
+   * Default `'none'`: every shadow root carries its own `<style>` copy of its stylesheets. `'link'` (0.3.0): every
+   * distinct stylesheet text (after trimming / minification; the complete texts in `full` mode) is stored once under a
+   * content hash in `styleSheetStore` and every shadow root gets `<link rel="stylesheet" href="..."
+   * data-swc-styles="...">` instead (`swc-ssr/client` restores and removes them like a marked `<style>`). The
+   * application must serve the store (`getStyleSheet(hash)`, `text/css`, `Cache-Control: public, max-age=31536000,
+   * immutable`) and put `RenderSpectrumResult.head` (preload hints) into its `<head>`. Stays inline: minified theme
+   * stylesheets (the client's theme bridge moves them as `<style>` elements), sheets under 160 bytes, and sheets with a
+   * relative `url()` / `@import` (fragment-only `url(#id)` is fine).
+   *
+   * Trade-off (docs/DESIGN.md "Style de-duplication"): Chromium waits in the parser at a shadow-root link whose sheet
+   * is not loaded, so it never paints content without its CSS, but a cold load renders progressively and ends later
+   * (one round trip per sheet not yet loaded; the head hints start them all at once). Firefox does not wait: it paints
+   * content without its sheet until the sheet arrives, for a few frames even from a warm cache. Opt-in for that reason.
+   * Other values count as `'none'`.
+   */
+  dedupe?: 'none' | 'link';
+  /**
+   * `dedupe: 'link'`: the URL of the stylesheet stored as `hash` (`css` is its text, e.g. to upload it elsewhere).
+   * Default: `/swc-css/<hash>.css`. Called once per distinct text and render; the result is HTML-escaped.
+   */
+  dedupeUrl?: (hash: string, css: string) => string;
 }
 
-/** `RenderReport.styles` (trimmed mode only). */
+/** `RenderReport.styles` (trimmed mode, and any mode with `dedupe: 'link'`). */
 export interface StylesReport {
-  /** The `StyleOptions.mode` that ran: `'trimmed'` (also with `minifyCustomProperties`). */
+  /**
+   * The `StyleOptions.mode` that ran: `'trimmed'` (also with `minifyCustomProperties`), or `'full'` (reported only
+   * with `dedupe: 'link'`).
+   */
   mode: string;
   /**
    * One entry per stylesheet of the output: `id` is `<tag>:<index in elementStyles>`, or `<tag>:<kind>/<name>` for
-   * theme fragments; `instances`: the shadow roots carrying it; `fullBytes` / `trimmedBytes`: UTF-8 size of ONE copy.
+   * theme fragments; `instances`: the shadow roots carrying it; `fullBytes` / `trimmedBytes`: UTF-8 size of ONE copy;
+   * `hash` (`dedupe: 'link'`): the `styleSheetStore` hash its text was linked as, absent when it stayed inline.
    */
-  sheets: Array<{id: string; tag: string; instances: number; fullBytes: number; trimmedBytes: number}>;
+  sheets: Array<{id: string; tag: string; instances: number; fullBytes: number; trimmedBytes: number; hash?: string}>;
   /** UTF-8 size of all copies (size x instances, summed): the CSS the page carries in `full` mode. */
   fullBytes: number;
-  /** UTF-8 size of all trimmed copies: the CSS the page carries now. */
+  /**
+   * UTF-8 size of all trimmed copies: the CSS the page carries without `dedupe` (with `dedupe: 'link'`:
+   * `dedupe.inlineBytes` in the HTML plus `dedupe.linkedBytes` fetched once).
+   */
   trimmedBytes: number;
   /** Milliseconds spent trimming (part of the render's `durationMs`). */
   durationMs: number;
+  /** `dedupe: 'link'` only. */
+  dedupe?: StylesDedupeReport;
+}
+
+/** `StylesReport.dedupe`: what `StyleOptions.dedupe: 'link'` linked. */
+export interface StylesDedupeReport {
+  mode: 'link';
+  /** Every distinct linked text, in document order of first use (the order of `RenderSpectrumResult.head`). */
+  sheets: Array<{hash: string; url: string; bytes: number; links: number}>;
+  /** `<link>` elements in the output. */
+  links: number;
+  /** UTF-8 bytes of the distinct linked texts (each fetched once per page, cacheable across pages). */
+  linkedBytes: number;
+  /** UTF-8 bytes of the CSS that stayed inline, every copy counted (the CSS the HTML still carries). */
+  inlineBytes: number;
 }
 
 export interface ElementReport {
@@ -160,6 +204,13 @@ export interface RenderReport {
 export interface RenderSpectrumResult {
   html: string;
   report: RenderReport;
+  /**
+   * Markup for the page's `<head>` (0.3.0): with `StyleOptions.dedupe: 'link'`, a `<link rel="preload" as="style">`
+   * per linked stylesheet URL, in order of first use; '' otherwise. Put it into `<head>`, before `<body>`, so that the
+   * downloads start before the parser reaches the shadow roots. `renderSpectrum` of `swc-ssr/server` always sets it
+   * (optional in this type only because the render core builds results without it).
+   */
+  head?: string;
 }
 
 export interface AdapterContext {

@@ -163,9 +163,18 @@ Lit into browser mode - check `lit`'s `node` export conditions).
   `GET /csr/:name` client-only versions (same template, no SSR, used as the reference DOM); `?nohydrate=1` serves SSR
   without the client bundle (pure SSR view); `GET /report.json` last render report. Serves `demo/public` (client bundle).
   The page language (`?lang=`, else `Accept-Language`, else `en`) goes to `renderSpectrum({lang})` and `<html lang>`;
-  `HEAD` on any path answers 200 without rendering (health checks).
-* `demo/build.mjs` - esbuild bundle of `demo/src/client.ts` -> `demo/public/dist/client.js` (ESM, sourcemap).
-* `demo/src/client.ts` - imports `swc-ssr/client` first, loads the catalog, hydrates with the same template + data as the server.
+  `HEAD` on any path answers 200 without rendering (health checks). Since 0.3.0 it compresses like a production server
+  (`compression`: brotli quality 4 preferred over gzip, nothing under 1 KB; `/dist` from the build's precompressed
+  `.br` / `.gz` siblings, chunks `immutable`) and mounts `demo/src/styles-routes.ts` (`?dedupe=link`, `?hints=`,
+  `GET /swc-css/<hash>.css`).
+* `demo/build.mjs` - esbuild (0.3.0: minified, code-split ESM with content-hashed `dist/chunks/*`, source maps, `.br`
+  (q11) / `.gz` (9) siblings for every script of 1 KB or more) of `demo/src/client.ts` -> `demo/public/dist/client.js`.
+  See "Demo build" under "Performance".
+* `demo/src/client.ts` - a 1.2 KB bootstrap: imports `swc-ssr/client` first (its only static import), sets the test
+  hooks, then loads `demo/src/client-app.ts` with `import()`, which loads the page's catalog entries (one
+  registration chunk each) and hydrates with the same template + data as the server.
+* `demo/src/catalog/page-theme.ts` / `page-theme-register.ts` - the shell's `sp-theme` with its light / medium
+  fragments, registered fragments first (see "Demo build").
 
 ### Tests (`tests/`, Playwright; unit tests in `packages/swc-ssr/test` via `tsx --test`)
 
@@ -188,7 +197,20 @@ the Pages table's Fidelity column. More rows of the Pages table: `tests/agnostic
 markup, hydration, fidelity against the client-rendered page in the same language). `tests/mobile.spec.ts` (390x844,
 `isMobile`, `hasTouch`, `deviceScaleFactor` 3) checks picker / action-menu / contextual-help on phones (no hydration
 errors or mismatch recoveries, mobile state after hydration, flicker, a tap opens an `sp-tray`) and writes the
-"Mobile" table. These specs follow `SWC_SSR_COMPONENTS` / `SWC_SSR_SMOKE`.
+"Mobile" table. These specs follow `SWC_SSR_COMPONENTS` / `SWC_SSR_SMOKE`. Narrowed runs (`SWC_SSR_COMPONENTS` /
+`SWC_SSR_SMOKE`, 0.2.2) write `tests/results/summary.partial.md` from a raw file of their own
+(`tests/results/raw.partial-<time>-<pid>.jsonl`, handed to the workers through `SWC_SSR_RAW_FILE`) and leave
+`summary.md` / `raw.jsonl` alone. `tests/server.spec.ts` covers the demo server itself (HEAD answers, compression and
+precompressed `/dist`, `?dedupe=link` routes, the split client build); `tests/styles-dedupe.spec.ts` the
+`dedupe: 'link'` output ("Style de-duplication").
+
+Unit tests (187, `npm run test:unit`) include two guards of the render speed (0.3.0): `perf-scaling.test.ts` (2N copies
+of a fragment must render in under 2.6x the time of N copies, minimum of 3 interleaved runs, for a mid-size Spectrum
+fragment and for one heavy in light-DOM attribute changes - 0.2.2 fails the latter at 3.43) and
+`perf-finalize.test.ts` (the one-copy end of a render equals the separate steps, 300 random pages and every fallback
+case; 2N raw regions finish in under 3x the time of N, with and without edits and a marker at the end).
+`tests/styles.spec.ts` `post-hydration:layout` (0.3.0 review; `/` and the color-area entry) checks that every
+`sp-color-handle` sits where client-side rendering puts it, at hydration and settled, in every style mode, 3 loads each.
 
 Fidelity normalization (`tests/helpers/dom.ts`): generated ids in id / id-reference attributes (Spectrum's `randomID()`
 suffixes and instance counters) are compared by reference structure (`<prefix>#n` in order of first appearance), and
@@ -237,7 +259,9 @@ Server (`swc-ssr/server`, all outside Spectrum sources):
   signature (tag + `id`/`name`/`slot`/`type`/`role`/`part`/`for`/`href`/`src` + `class`) and content; otherwise the
   change moves to the single exact match in the scope, or stays at the recorded position when the scope's structure
   along the path is unchanged, or is skipped with a warning (order: `light-mutations.ts` file comment). Whole documents are parsed with parse5 `parse()`
-  (`isDocumentHtml` is shared with `ServerTree`).
+  (`isDocumentHtml` is shared with `ServerTree`). Since 0.3.0 the changes are located in the `ServerTree` the renderer
+  built anyway to verify the final pass's adoptions (built with source locations when that pass recorded changes) and
+  applied to the page in one copy (see "Performance"); the location rules and warnings are unchanged.
 * The previous pass's shadow used as fallback output has its `data-swc-ssr` markers stripped
   (`ServerTree.serializeShadow(id, {stripMarkers: true})`).
 * Lazy definitions: undefined tags are tracked per render session; pass 1 is repeated when such a tag got defined
@@ -486,6 +510,13 @@ passes now (122 unit tests). Full catalog: HTML and reports identical to 0.1.1 (
   pass 2 on) and restored.
 * Module-level instance counters in Spectrum ids (`sp-dialog-label-N`) make the output of the first and later renders
   of one process differ slightly; fidelity tests normalize them.
+* Caches (0.3.0), all bounded, built only from template, selector or stylesheet text, holding no render data:
+  compiled css-select queries and matchers per selector string (`dom-shim/select.ts`, at most 2048 each, cleared when
+  full; selectors containing `scope` are compiled per call because `:scope` depends on the context; selectors that fail
+  to compile are never cached, so they throw and are reported every time); the static-attribute hash per canonical
+  string (`context.ts`, at most 4096); canonical static attributes per upstream static-attribute `Map` (`plan.ts`,
+  `WeakMap`). With `dedupe: 'link'`: `styleSheetStore`, the distinct linked stylesheet texts (LRU, 32 MiB by default;
+  "Style de-duplication").
 
 ## Style trimming (0.2.0)
 
@@ -543,7 +574,11 @@ docs/API.md "Styles". Code: `packages/swc-ssr/src/server/styles/`, `packages/swc
    is in the theme (the bridge keeps the short name defined for elements on minified CSS, the upgraded theme the
    original one for restored elements), or whose every definition and use is inside the sheets of one element class
    (restored together) or inside one sheet object several classes share (each instance defines and reads the name in
-   its own root). Owners are computed per trimmed sheet (`#theme`, the tag, the sheet object). Never renamed:
+   its own root). Owners are computed per trimmed sheet (`#theme`, the tag, the sheet object). Since 0.2.2 the complete
+   stylesheets of every element class with a shadow root in the output (also sheets that stayed complete) are scanned
+   as well, once per stylesheet object and process (`completeNamesOf`, cached with the parse): their names count as
+   uses for the class / sheet owners, their definitions veto theme ownership, and none of them becomes a short name.
+   Not the server registry: it is process-wide, so the output would depend on what earlier renders defined. Never renamed:
    `PUBLIC_CUSTOM_PROPERTY_PREFIXES` (`--mod-*`, `--highcontrast-*`, `--system-*`, Spectrum's customisation API,
    whatever the options), names one element class defines and another reads, `references`, names in `style`
    attributes or uncontrolled CSS, and names that are only read. Joining classes that share a sheet into one owner
@@ -557,8 +592,9 @@ docs/API.md "Styles". Code: `packages/swc-ssr/src/server/styles/`, `packages/swc
    failure in any step falls back to the complete stylesheets with a `#render` warning.
 
 Measured (`.probe/css-stats.ts`, `.probe/review-styles/sizes.ts`, docs/API.md "Styles" has the table): button page CSS
-1230 -> 823 KB trimmed / 454 KB minified (gzip 120 -> 79 / 15 KB), picker 1294 -> 475 / 330 KB, whole catalog
-18121 -> 12616 KB (69.6 %) / 8224 KB (45.4 %), 6864 KB (37.9 %) with `undefinedPrefixes: ['--mod-']`. 0.2.0 renamed
+1230 -> 823 KB trimmed / 454 KB minified (gzip 120 -> 79 / 15 KB), picker 1294 -> 475 / 346 KB, whole catalog
+18121 -> 12616 KB (69.6 %) / 8305 KB (45.8 %), 6945 KB (38.3 %) with `undefinedPrefixes: ['--mod-']` (0.2.2; 0.2.1:
+330 KB, 8224 KB = 45.4 %, 6864 KB = 37.9 %). 0.2.0 renamed
 more (minified 298 KB / 231 KB / 5689 KB = 31.4 %, 4329 KB = 23.9 % with `--mod-` collapsed); the names 0.2.1 keeps
 (`.probe/review-styles/long-names.ts`, catalog with `--mod-` collapsed): `--system-*` 0.92 MB, `--highcontrast-*`
 0.76 MB, cross-class `--spectrum-*` 0.76 MB (1.37 MB before shared sheets counted as one owner), `--mod-*` the page
@@ -634,8 +670,13 @@ difference is in every capture; load-to-load raster noise (a few anti-aliased pi
 `action-menu`, the server's very first render of a page) is not. Hydrated pages are repainted once (`forceRepaint`)
 before they are captured: a page that swapped its style sources repaints regions whose computed values did not change,
 and Chrome then rasterizes some anti-aliased edges one colour level differently from the first paint (probed: 8 px of
-`field-label`, deterministic, gone after any later repaint; computed styles and layout identical). Per catalog entry
-and for `/`:
+`field-label`, deterministic, gone after any later repaint; computed styles and layout identical). Since 0.3.0 the
+held (`interim`) captures are repainted too: `<sp-theme>` upgraded there, and with the code-split client bundle the
+upgrade comes after the first paint, so the minified theme page showed 1 px (an edge of the outline button in the
+nested dark theme, 82 vs 83) in every load - the minified page differed from itself before / after a repaint, its
+computed styles and sub-pixel geometry equal to full's for all 49 elements, and 0 px with both pages repainted
+(`.probe/integrate/theme-interim.ts`, `theme-interim-pixels.ts`). A repaint re-rasterizes the current styles, so a
+real CSS difference still shows. Per catalog entry and for `/`:
 
 | Check | What |
 |---|---|
@@ -647,7 +688,8 @@ and for `/`:
 | `post-hydration:states` | interactive entries, after hydration: hover, focus, click the first control, `disabled` on it, `size="xl"` on the first button, `quiet` toggled, `selected` on the first menu item / tab, `invalid` on the first text field (each awaited through `updateComplete`); every step equals the full page |
 | `removeServerStyles` | `?removeStyles=1` on full and trimmed pages: no `<style>` left in sp-* shadow roots, paint equals the full page |
 | `size` | `/styles.json`: trimmed smaller than full; `report.styles` consistent |
-| `late definition: <tag>` (tests/styles-late.spec.ts) | `?late=<tag>` holds a definition back until after `hydrateSpectrum()`: `sp-theme` (button, theme), `sp-tab` (tabs), `sp-menu-item` (menu), `sp-table-cell` (table); trimmed and minified equal full while it is missing and after it arrived; then no marked `<style>` left, every hydrated Lit element on adopted sheets |
+| `late definition: <tag>` (tests/styles-late.spec.ts) | `?late=<tag>` holds a definition back until after `hydrateSpectrum()`: `sp-theme` (button, theme, table), `sp-tab` (tabs), `sp-menu-item` and `sp-menu` (menu), `sp-breadcrumbs` (breadcrumbs), `sp-table-cell` and `sp-table` (table). For the late parents, a `state` view changes state on the children while the parent is missing (icon + `disabled` / `focused` on menu items, `disabled` on a breadcrumb item, `active` / `drop-target` on a table head cell / row). Trimmed and minified equal full while the tag is missing, in that state, and after it arrived. Late `sp-theme` on the table page: the theme-pending warning is reported, and only the defined view must match (client-created checkbox cells lack pruned theme values while it is missing). Afterwards no marked `<style>` is left and every hydrated Lit element runs on adopted sheets. All cases of one entry run in one test |
+| `dedupe:static` / `dedupe:post` / `dedupe:paint` (tests/styles-dedupe.spec.ts, 0.3.0) | `?dedupe=link` in full, trimmed and minified mode: see "Style de-duplication" |
 | `app --mod-* override` (tests/styles-late.spec.ts) | an application stylesheet sets `--mod-actionbutton-*` on `sp-action-button`: without the client and hydrated, trimmed and minified equal full |
 | `without constructable stylesheets` (tests/styles-late.spec.ts) | only the client's feature test fails (Lit and `<sp-theme>` keep adopting): held and hydrated button / tabs pages, trimmed and minified equal full |
 
@@ -682,6 +724,374 @@ constructable stylesheets 98,653 px (button) / 29,068 px (tabs).
   page whose client bundle was rewritten by a build-time renamer onto consistent (client) names after hydration.
   **Bridge without constructable stylesheets (L4)**: the install condition no longer asks.
 * **Docs (L5)**: docs/API.md "What trimming can break" (attributes set in `connectedCallback()`, build-time renamers).
+
+### Review fixes (0.2.2)
+
+* **Complete sheets in the ownership rule (medium).** Step 6 judged owners from the trimmed texts only. The client
+  restores complete sheets, so a child restored while its parent was defined late read original names that the parent
+  defined only under short names: 42 names on the catalog (`.probe/review-styles2/menu-late.ts`: the disabled
+  menu-item icon was rgb(0, 0, 0) instead of rgb(177, 177, 177); the e2e state views fail on 0.2.1 with 117 / 232 /
+  20,613 px for menu / breadcrumbs / table). Cost: catalog minified +81 KiB (45.4 -> 45.8 %), picker +16 KiB, menu
+  +4 KiB.
+* **Pending theme (medium).** While `sp-theme` is late or never defined, client-created content and later states have
+  no values for theme properties the server pruned or renamed. Nothing on the client can supply the complete theme
+  without its definition, so `hydrateSpectrum()` warns (`pendingTrimmedThemes()`: a scan only on trimmed pages while
+  `sp-theme` is undefined), and the docs state the assumption (`trimTheme` / `minifyCustomProperties` need `sp-theme`
+  defined before client-side changes; otherwise `trimTheme: false` and no minification). Remaining gap, by design: the
+  complete-sheet scan covers the element classes that have a shadow root in the server output; a class that only the
+  client creates under a parent still on minified CSS (parent defined late) could still read a renamed name. The
+  process-wide registry would close it but make the output depend on earlier renders.
+* **Narrowed e2e runs (low).** `SWC_SSR_COMPONENTS` / `SWC_SSR_SMOKE` runs write `tests/results/summary.partial.md`
+  from their own `raw.partial-<time>-<pid>.jsonl` (handed to the workers through `SWC_SSR_RAW_FILE`). A run narrowed
+  only by spec-file arguments or `--grep` still writes `summary.md` (with a partial table).
+
+## Performance (0.3.0)
+
+Before 0.3.0 the server rendered everything before the first byte at about 1.7-4 ms per element (whole catalog,
+1349 elements, 3 passes: 2.3-6 s on a loaded laptop), and the catalog page took 24 s to load in Chromium (19.8 s to
+first paint) with 6.5-19 MB of HTML, a 2.5 MB single-file client bundle and no compression. Three streams of work, all
+without changing the output (verified below).
+
+### Server render
+
+Render time, 0.2.1 (108f5b1, `git archive` of `packages/swc-ssr/src` into `.probe/integrate/base-0.2.1`) against 0.3.0,
+same process setup, same demo catalog, alternating, minimum of 3 (`.probe/integrate/bench.ts`; one-component pages:
+minimum of 20 renders after 5 warm-up renders; the catalog: one render per fresh process after warming up on the
+button, menu and picker pages). The machine was otherwise idle, but see the note on throttling below: absolute
+times vary by about 2x between sessions of this laptop, the ratios do not.
+
+| Page (elements, passes) | 0.2.1 | 0.3.0 | per element | speed-up |
+|---|---|---|---|---|
+| `/component/button` (33, 2) | 30.0 ms | 21.3 ms | 0.91 -> 0.65 ms | 1.4x |
+| `/component/picker` (68, 2) | 62.2 ms | 48.2 ms | 0.91 -> 0.71 ms | 1.3x |
+| `/` full (1349, 3) | 3756 ms | 1898 ms | 2.78 -> 1.41 ms | 2.0x |
+| `/` trimmed | 2523 ms | 2163 ms | 1.87 -> 1.60 ms | 1.2x |
+| `/` minified | 2612 ms | 2155 ms | 1.94 -> 1.60 ms | 1.2x |
+| `/` trimmed + `dedupe: 'link'` | - | 2121 ms | 1.57 ms | - |
+| `/component/button` trimmed + `dedupe: 'link'` | - | 22.7 ms | 0.69 ms | - |
+
+0.2.1 rendered the catalog faster trimmed than full: its intermediate passes carry stylesheet placeholders instead of
+19.5 MB of CSS, so the per-change page copies of the light mutations were cheap there. 0.3.0 renders `full` fastest;
+trimming (`resolveStyles`, about 0.25 s on the catalog) is now the main extra cost of the other modes. `dedupe: 'link'`
+costs nothing measurable (one hash per distinct text).
+
+CPU profile of 3 catalog renders (`full`, after one warm-up, 200 µs sampling; `PROF=` of the same bench,
+`.probe/integrate/compare-prof.mjs`), self time in ms per render (µs per element); wall times 3665-4223 ms (0.2.1) and
+1374-1607 ms (0.3.0):
+
+| Self time | 0.2.1 | 0.3.0 |
+|---|---|---|
+| total sampled | 4038 (2994) | 1624 (1204) |
+| swc-ssr | 2188 (1622) | 605 (449) |
+| GC | 771 (572) | 171 (127) |
+| parse5 | 274 | 228 |
+| lit | 159 | 131 |
+| Spectrum components | 147 | 140 |
+| ssr-dom-shim | 116 | 110 |
+| css-select | 66 | 22 |
+| @lit-labs/ssr | 65 | 58 |
+| `applyLightMutations` | 1194 | 0 |
+| `ServerTree` | 111 | 32 |
+| `facadeOf` | 110 | 37 |
+| `hashString` | 80 | 0 |
+| `finalizeHtml` | 52 | 26 |
+| `nodeList` | 25 | 3 |
+| `collect` | 13 | 59 (the single join of each pass output, charged to `ServerTree` / `hashString` before) |
+
+The render-speed agent's profile under the same conditions (in-process, throttled, plain-JS builds of both trees) had
+3393 -> 1765 ms sampled per render, `applyLightMutations` 1163 -> 0 ms, GC 622 -> 193 ms; best fresh renders of the
+catalog 0.99-1.05 s (0.73 ms per element) against 2.18-2.38 s for 0.2.x in a quieter period.
+
+What changed (`packages/swc-ssr/src/server/*`, `dom-shim/*`):
+
+* **Light mutations** (`light-mutations.ts`), the largest item. 0.2.x located every recorded attribute change by
+  parsing the final output again and applied each as a full copy of the page (the catalog page is a 39 MB two-byte
+  string because of the Japanese font names in the theme: 21-34 % of the catalog render). Now the changes are located
+  in the `ServerTree` the renderer builds anyway to verify the final pass's adoptions (built with parse5 source
+  locations when that pass recorded changes; `sourceOffset()` maps parsed offsets back across the replaced `<style>`
+  bodies), child lists and positions are cached per node (locating was quadratic in large scopes), and the edits are
+  applied in one copy (`applyEdits`). In `full` mode without a style collector, `finalizeHtml` applies the edits,
+  strips the `data-swc-ssr` markers and finishes the raw regions in a single pass (one copy instead of three; the
+  global marker `replace` also returned an unflattened string that cost ~15 ms and 37 MB to flatten); it falls back to
+  the separate steps for edits that touch a raw region, contain `<!--` or the marker name, or lie within 36
+  characters of a marker. Location rules and warnings are unchanged.
+* **Facades** (`realm.ts`, `dom-shim/nodes.ts`): structure backings are class instances with shared methods
+  (`NodeBacking`, `SlotBacking`, `ShadowBacking`, `CommittedShadowBacking`) instead of 4-5 closures per node; plain
+  facades get their backing at construction (`createPlainElement(tag, backing)`, `ServerText(data, backing)`), no
+  throw-away detached backing; attribute recording and the event-path links go through the facade's backing, so the
+  two `WeakMap` entries per facade are gone (they were the costliest lines of `facadeOf`); `nodeList()` shares one
+  `item` function.
+* **Selectors and bookkeeping**: the selector engine reads backing arrays directly where `childNodes` is the shim's
+  own getter (`setShimChildNodesGetter`); compiled css-select queries are cached per selector (except `:scope`
+  selectors; compiled with `cacheResults: false`, see "Review of the 0.3.0 changes" below); canonical static attributes and their hashes are cached; `verifyAdoptions` counts signatures once per
+  group instead of comparing every pair; `collect()` joins the pass output once (`+=` built a rope of ~300k pieces)
+  and enters the render context once per synchronous stretch instead of once per thunk.
+* **Parses and hashing**: 3 parses per catalog render instead of 4; the next pass's id seed hashes the tree's parsed
+  text (long `<style>` bodies replaced) instead of the 19.5 MB HTML (~60 ms per render; ids differ from 0.2.x, see
+  docs/API.md "Deterministic ids").
+* **The third pass** stays: 3 of 60 pages need it (the whole catalog, breadcrumbs, dialog), triggered by elements that
+  only appear in pass 2 and fail there (`sp-action-menu` in the `sp-breadcrumbs` overflow, `sp-button-group` in the
+  `sp-dialog` footer, `sp-slider`). A 2-pass output differs on every one of them (the breadcrumbs menu items' `role` /
+  `aria-checked` / `tabindex`, `disabled=""` on the catalog), so the trigger cannot be narrowed without changing
+  output (`.probe/perf/pass3.ts`). Re-rendering only the affected subtrees would be an architectural change.
+
+Remaining cost, in order: parse5 (about 15 %, 3 parses per catalog render; the htmlparser2 tree adapter is about 25 %
+slower than parse5's default one, but css-select needs it), Spectrum / Lit / `@lit-labs/ssr` themselves, GC (in `full`
+mode each pass inlines all CSS: three 39 MB pass outputs per catalog render; emitting style placeholders in the
+intermediate passes of `full` mode too would remove most of it), and in trimmed / minified mode `resolveStyles`
+(about 20 % of a trimmed render; it parses the output into a `ServerTree` once more and could reuse the final
+verification tree when no light-mutation edits were applied).
+
+Measuring on this laptop (i7-1255U, 15 W): a Node process slows down about 4.7x for good after about 3 s of
+continuous CPU work (a steady FNV loop goes from 28-30 ms to 120-140 ms per iteration and stays there after 30 s idle),
+so back-to-back catalog renders measure the throttled state and penalize slower code twice. The numbers above are
+single renders in fresh processes after a short warm-up on small pages (`.probe/integrate/bench.ts`
+`WARMPAGE=button,menu,picker WARM=3 N=1`), alternating old and new, minimum of 3; small pages are the minimum of 20
+renders after 5 warm-up renders. Guards: `perf-scaling.test.ts` (2N vs N copies, under 2.6x) and `perf-finalize.test.ts`
+(the one-copy finish equals the separate steps; 2N raw regions under 3x the time of N).
+
+**Review of the 0.3.0 changes** (an adversarial review and a fresh re-run; probes in `.probe/review-perf/`, results in
+`tests/results/rerun-perf/`):
+
+* **Stale selector results.** css-select's default `cacheResults: true` gives every compiled descendant combinator a
+  `WeakSet` of ancestors that did not match (and every `:has` / `:contains` a `WeakMap` of results). Compiled per
+  call (0.2.x) that lived for one query; in the process-wide cache of compiled selectors it lived for the process, so
+  a later query missed an ancestor whose attributes changed in between (`.probe/review-perf/select-cache.ts`:
+  `div>p>span`, `.on span` null, `p.setAttribute('class', 'on')`, still null; `matches('[data-x] em')` stayed false;
+  `select-cache-render.ts`: a component that queries after its sibling set `data-active` on an ancestor rendered `none`
+  where the browser renders `found`). Components query and mutate during a pass, so the cache now compiles with
+  `cacheResults: false` (the compiled selectors themselves stay cached). Render time unchanged: catalog `full`, fresh
+  processes, alternating, 10 s apart, minimum of 3: 0.2.1 2550 ms, 0.3.0 with the stale caches 1207 ms, fixed 1190 ms
+  (2.1x; `tests/results/rerun-perf/fix/bench-catalog-full-3way.log`); output identical to 0.2.2 (372 of 372 files).
+  Unit tests: `select-cache.test.ts` (query, mutate an ancestor, query again; `matches` / `closest` / `:not` / `:is` /
+  `:has`; the render case).
+* **Quadratic finish.** `finalizeHtml` looked for the next `data-swc-ssr` marker from each raw-region boundary with a
+  regex scan to the end of the page whenever no marker followed before the region: O(regions x page)
+  (`.probe/review-perf/finalize-regions.ts`: 5,000 regions 775-901 ms on a quiet machine, 3,124 ms in the review;
+  20,000 regions 15 s; 0.2.1 5-29 ms). The last scan result is kept across the regions and rescanned only when the
+  position passed it (every character scanned once): 5,000 regions 10-14 ms, 20,000 regions 32-34 ms. The per-edit
+  region check (`touchesRegion`) is a binary search instead of a scan of all regions.
+
+**Output unchanged.** `.probe/integrate/snapshot.ts` renders every catalog entry's page, the whole catalog twice and dialog + slider
+(3 passes) in `full`, `trimmed` and `minified` mode with a given source tree, and `.probe/perf/cmp.mjs` compares the
+HTML and the reports, generated ids normalized by order of first appearance (`-[0-9a-f]{8}` suffixes; the only
+allowed difference, see docs/API.md "Deterministic ids"). 0.3.0 against 0.2.2 (4b26038): 372 of 372 files identical
+(all three modes). Against 0.2.1 (108f5b1): `full` and `trimmed` 248 of 248 identical; `minified` 82 identical and 42
+differing - exactly the files 0.2.1 and 0.2.2 differ in (the 0.2.2 ownership fix), so 0.3.0 adds no difference.
+Reports are identical apart from durations.
+
+**Heap.** `.probe/integrate/leak.ts` (`N=12 YIELD=50`, the whole catalog, `node --expose-gc`, heap after GC): `full` 111-114 MB
+(flat from render 5; 110-112 MB in 0.1.x / 0.2.x, the difference is the new bounded caches), `trimmed` 100-103 MB,
+trimmed + `dedupe: 'link'` 50-51 MB (the output is 1.2 M characters instead of 13.6 M; `styleSheetStore` holds the same
+122 sheets / 823 KiB after every render - one text per hash, nothing accumulates).
+
+### Bytes and the browser
+
+Sizes and bytes on the wire of the demo pages as served (`.probe/integrate/wire.ts`: the demo in-process, one request
+per `Accept-Encoding`; KiB; "link CSS" = the distinct `/swc-css/` texts of the page, each fetched once and compressed
+by the demo like every response; brotli is quality 4 on the fly):
+
+| Page | Mode | HTML | of which inline CSS | HTML gzip | HTML brotli | linked sheets / links | link CSS | link CSS brotli | cold total brotli |
+|---|---|---|---|---|---|---|---|---|---|
+| button | full | 1252.6 | 1230.5 | 120.5 | 43.7 | - | - | - | 43.7 |
+| | trimmed | 846.6 | 823.6 | 80.0 | 12.0 | - | - | - | 12.0 |
+| | minified | 477.8 | 454.8 | 15.4 | 10.4 | - | - | - | 10.4 |
+| | trimmed + link | 28.4 | 0.7 | 3.2 | 3.0 | 12 / 62 | 77.0 | 12.1 | 15.2 |
+| | full + link | 28.3 | 0.5 | 3.1 | 3.0 | 10 / 64 | 380.4 | 43.3 | 46.2 |
+| picker | full | 1350.6 | 1310.3 | 117.8 | 48.3 | - | - | - | 48.3 |
+| | trimmed | 538.9 | 480.6 | 57.3 | 13.2 | - | - | - | 13.2 |
+| | minified | 407.8 | 349.5 | 47.0 | 11.6 | - | - | - | 11.6 |
+| | trimmed + link | 66.6 | 2.5 | 5.0 | 4.8 | 13 / 80 | 59.4 | 12.0 | 16.8 |
+| `/` (catalog) | full | 19105.7 | 18121.9 | 1488.7 | 255.4 | - | - | - | 255.4 |
+| | trimmed | 13632.5 | 12616.6 | 997.2 | 179.5 | - | - | - | 179.5 |
+| | minified | 9323.9 | 8305.3 | 643.6 | 156.0 | - | - | - | 156.0 |
+| | trimmed + link | 1169.9 | 34.0 | 88.2 | 62.3 | 122 / 1751 | 822.9 | 138.8 | 201.1 |
+| | full + link | 1164.5 | 2.7 | 87.0 | 61.5 | 101 / 2243 | 1170.0 | 160.7 | 222.1 |
+| | minified + link | 1361.2 | 226.3 | 127.6 | 74.3 | 113 / 1709 | 465.0 | 107.3 | 181.6 |
+
+With brotli the inline page is even a little smaller than the linked page plus its sheets on a cold load (the
+per-file compression of 100+ small sheets loses what brotli's window gains on the inline page); `'link'` wins with gzip (trimmed catalog 997 KiB inline
+vs 88 + 136 KiB) and on every repeat visit (the HTML only: 3.0 KiB button, 62.3 KiB catalog), and it cuts what the
+browser parses (1.2 MB instead of 13.6 MB of HTML on the catalog).
+
+Browser timings (`.probe/integrate/timing.ts`: Chromium via Playwright, the demo in-process, JavaScript on, median of
+3 loads; ms from navigation start; "hydrated" = `window.__swcSsrHydration` resolved). 0.2.1 = the 108f5b1 server
+code and demo server (no compression) with the single 2.5 MB client bundle of 0.2.x (`.probe/integrate/base-server.ts`);
+0.3.0 = this tree (compression, split bundle). TTFB includes the server render (the catalog is rendered for every request):
+
+| Page | Network | HTML / bundle on the wire (KB) | TTFB | FCP | DCL | hydrated |
+|---|---|---|---|---|---|---|
+| `/component/button?styles=full` | localhost | 0.2.1: 1253 / 2548 | 48 | 108 | 149 | 164 |
+| | | 0.3.0: 44 / 88 (37 files) | 35 | 92 | 95 | 198 |
+| `/component/button?styles=minified` | localhost | 0.2.1: 478 / 2548 | 49 | 96 | 133 | 146 |
+| | | 0.3.0: 10 / 88 | 50 | 92 | 94 | 195 |
+| `/component/button?styles=trimmed&dedupe=link` | localhost | 0.3.0: 3 (+ 12 CSS) / 88 | 25 | 76 | 71 | 164 |
+| `/?styles=full` | localhost | 0.2.1: 19106 / 2548 | 3095 | 3192 | 4205 | 4299 |
+| | | 0.3.0: 255 / 364 (171 files) | 951 | 1040 | 1321 | 1910 |
+| `/?styles=minified` | localhost | 0.2.1: 9243 / 2548 | 1672 | 1780 | 2812 | 2874 |
+| | | 0.3.0: 156 / 364 | 1405 | 1520 | 1752 | 3131 |
+| `/?styles=trimmed&dedupe=link` | localhost | 0.3.0: 62 (+ 139 CSS) / 364 | 1238 | 1432 | 1637 | 2597 |
+| `/component/button?styles=full` | 10 Mbit/s, 40 ms | 0.2.1 | 44 | 320 | 3215 | 3227 |
+| | | 0.3.0 | 39 | 104 | 240 | 937 |
+| `/component/button?styles=minified` | 10 Mbit/s, 40 ms | 0.2.1 | 40 | 84 | 2614 | 2626 |
+| | | 0.3.0 | 32 | 112 | 231 | 946 |
+| `/component/button?styles=trimmed&dedupe=link` | 10 Mbit/s, 40 ms | 0.3.0 | 28 | 188 | 352 | 1052 |
+| `/?styles=full` | 10 Mbit/s, 40 ms | 0.2.1 | 2726 | 3004 | 20379 | 20441 |
+| | | 0.3.0 | 1063 | 1176 | 1739 | 3880 |
+| `/?styles=minified` | 10 Mbit/s, 40 ms | 0.2.1 | 1270 | 1348 | 11378 | 11434 |
+| | | 0.3.0 | 1269 | 1324 | 1768 | 4118 |
+| `/?styles=trimmed&dedupe=link` | 10 Mbit/s, 40 ms | 0.3.0 | 980 | 1080 | 2437 | 4751 |
+
+(The resource-timing buffer holds 250 entries, so on linked catalog pages the bundle is undercounted: 128 of 171
+files.) Over a real network the transfer dominates: the catalog hydrates 5.3x (full) and 2.8x (minified) sooner and
+reaches DOMContentLoaded 11.7x / 6.4x sooner, the button page hydrates 3.4x / 2.8x sooner. On an unthrottled
+localhost the split bundle's import waterfall (about 5 levels) costs 30-50 ms on the button page and up to 0.3 s on
+the minified catalog; the full catalog still hydrates 2.3x sooner (no 19 MB document to parse). Linked stylesheets
+cost round trips on a cold load (catalog: DOMContentLoaded 2437 ms vs 1739 ms full inline over the throttled link,
+with about 120 stylesheet requests over HTTP/1.1) - see "Style de-duplication" for the paint side.
+
+### Demo build
+
+The demo's client was one 2.5 MB unminified file. 0.3.0 builds it like production code (`demo/build.mjs`): minified,
+code-split ESM (`client.js` a 1.2 KB bootstrap, content-hashed chunks), precompressed `.br` / `.gz` siblings, chunks
+`immutable`. Two findings, both about the order of definitions (docs/API.md "Definition order on the client"):
+
+* **Evaluation order.** `swc-ssr/client` must run before `lit-element` creates `LitElement`. With code splitting a
+  bundler may move a module several chunks share into a chunk the entry imports first, so the entry imports only
+  `swc-ssr/client` statically and loads the application with `import()`; the build fails when `lit-element` or a
+  Spectrum module is in the entry's static graph (negative control: a static `import 'lit'` fails the build).
+* **Definition order and spacing.** Plain per-module `import()` chunks raced: `sp-sidenav-item` defined before
+  `sp-sidenav` threw `startTrackingSelectionForItem is not a function` (3 of 20 loads), and combobox / sidenav items
+  ended with roving `tabindex="-1"` where client-side rendering has none (combobox 5 of 6 loads, sidenav about half of
+  the e2e loads): Spectrum's `FocusGroup` / `RovingTabindexController` queues a `requestAnimationFrame`
+  `manageTabindexes()` that then runs after the synthetic initial `slotchange` called `unmanage()`. The single bundle
+  always happened to order these. A build plugin rewrites each catalog entry's `load()` into one module of static
+  imports in `load()` order (`register-<entry>`), so an entry's elements are defined in one task, in order (0 of 30
+  loads with errors or differing tabindex afterwards); `page-theme-register.ts` registers the theme fragments before
+  `sp-theme` (defining `sp-theme` first empties its declarative shadow root before any fragment exists: an unthemed
+  frame even with `full` CSS, CLS 0.032 on badge, 0.012 on menu). Not fixed in the library: hydration that tolerates
+  any definition order would need the client to order Spectrum's first `manageTabindexes` frame (open issue).
+* **Color-area handles in the corner** (review of 0.3.0; fixed in `swc-ssr/client`, not in the demo). On the catalog
+  page the `sp-color-area` handles stayed at the top-left corner after hydration (handle offset -7,-7 instead of
+  183,-7) in 11 of 14 loads with the split bundle, 0 of 8 with the 0.2.1 single bundle; the server HTML was
+  byte-identical. Not a definition-order problem: the demo awaits every entry's `load()` before `hydrateSpectrum()`,
+  which awaits `whenDefined` for every tag on the page. `ColorArea`'s own `connectedCallback()` runs at the upgrade,
+  also while the element carries `defer-hydration` (only `LitElement`'s is deferred), and starts a ResizeObserver whose
+  first callback stores `boundingClientRect` and requests an update; `render()` derives the handle's
+  `style="transform: translate(...)"` from it. The single bundle defined everything and hydrated in the same task, so
+  the hydrating render was unmeasured like the server markup and the observer's later update wrote the measured
+  position. With per-entry chunks color-area is defined frames before the last entry arrives; the observer measures
+  first, the hydrating render computes the measured translate, and lit's `hydrate()` primes attribute parts with that
+  value without committing it (`_$setValue(..., noCommit)`: hydration assumes the server markup equals the first
+  client render), so the DOM keeps `translate(0px, 0px)` until the value changes. The same happens with the 0.2.1 single
+  bundle and `?hydrateDelay=300` (3 of 3 loads, `.probe/review-perf/fix/handles-delay.ts BASELINE=1`), and on the
+  component page a short unmeasured state lasted until the observer's frame (0.5-3.5 s in the review's runs).
+  The built-in measured-layout adapter (`client/hooks.ts`; by shape: `getContentBoundingRect()` / `cacheLayoutData()`,
+  so `sp-color-wheel` and subclasses too) hides an existing measurement for the hydrating render, restores it after
+  the hydrating update and requests one more update, which renders with the measurement `firstUpdated()` just took and
+  commits it: after the fix 32 of 32 loads (`/` and `/component/color-area`, full and minified, `hydrateDelay` 0 and 300)
+  had every handle in place already when `window.__swcSsrHydration` resolved. E2e: `tests/styles.spec.ts`
+  `post-hydration:layout` (`/` and the color-area entry; every `sp-color-handle` at the offset client-side rendering
+  gives, 0 px, at hydration and settled, full / trimmed / minified, 3 loads each; fails without the adapter: 100
+  mismatches on `/`).
+* The split bundle hydrates later than the single file on an unthrottled localhost (more requests, an import
+  waterfall about 5 levels deep: `client.js` -> 4 shared chunks -> `client-app` -> `register-<entry>` -> its chunks)
+  and much sooner over a real network (table above). A build-time manifest with `<link rel="modulepreload">` in the
+  shell (the server knows the page's entries) would flatten the waterfall; not done. `client-app` is 115 KB (about
+  20 KB brotli) because `demo/src/catalog/index.ts` statically imports every entry's template.
+
+## Style de-duplication (0.3.0)
+
+Why: trimming shrinks each sheet, but every shadow root still carries its own copy - the button page is 21 copies of a
+36 KB `sp-button` sheet plus the theme (distinct CSS 77 KB of 823 KB trimmed), the catalog 1346 copies of 0.6-1.9 MB
+of distinct CSS. Declarative shadow DOM cannot share a sheet between roots without JavaScript (adopted sheets need
+script), except through the HTTP cache. Contract: docs/API.md "Styles" (`dedupe`). Code:
+`packages/swc-ssr/src/server/styles/dedupe.ts` (store, `Linker`, head hints), `trim.ts` (`linkable()`, `substitute()`),
+`client/server-styles.ts` (links counted as server styles), `demo/src/styles-routes.ts`.
+
+* **Emission.** The collector runs whenever `dedupe` is `'link'`, in `full` mode too, where it only counts the
+  occurrences (nothing is parsed or trimmed; report `mode: 'full'`). Step 7 of the trimmer (`substitute`) replaces a
+  linkable sheet's token with a `<link data-swc-styles>` in its place, splitting the `<style>` around it, so the
+  shadow root's cascade order is the `elementStyles` order as before. `'complete'` marks a linked sheet nothing was
+  taken from: the client must still restore and remove it, but a theme on complete links is not "pending".
+* **What stays inline**, and why: minified theme sheets (the theme bridge re-inserts the server `<style>` after
+  `<sp-theme>` upgraded; a re-inserted `<link>` would be fetched / processed asynchronously and miss the frame),
+  sheets under 160 bytes (the `<link>` is about 90 bytes), sheets with a relative `url()` / `@import` (resolved against
+  the sheet's URL when linked). Fragment-only `url(#id)` is linked: CSS Values 4 resolves it against the document in
+  every stylesheet; measured with an open `sp-color-loupe` and the theme's
+  `--spectrum-colorloupe-checkerboard-fill: url(#checkerboard-primary)`: linked and inline 0 px apart in Chromium and
+  Firefox (`.probe/dedupe/loupe.ts`). Before that decision `full` + `'link'` kept a 40 KB theme fragment inline on every
+  page.
+* **Head hints.** `result.head` preloads every URL in order of first use. Measured on the catalog over emulated 4G,
+  cold cache, DOMContentLoaded: preload 4129 ms, `media="not all"` stylesheet 4190 ms, no hint 4068 ms - no difference:
+  Chromium's preload scanner already finds the links inside the declarative templates, and the renders are not
+  streamed (the whole HTML arrives before any link could be discovered late). Preload stays the default because it is
+  cheap and helps a streaming server. The texts cannot be document stylesheets: their rules would match the light DOM.
+* **Store.** One LRU per process (32 MiB): a URL is only valid in the process that rendered it, until evicted. In
+  Chromium a 404 lets the parser go on without the sheet; the elements then stay unstyled until they hydrate. Review of
+  0.3.0: a pure byte-budget LRU could evict a text that a page had just linked, before its browser fetched it (many
+  distinct trimmed pages rendered in a row). A text is now protected for `minLifetimeMs` (60 s) after a render last put
+  it; the store may exceed the budget while fresh texts hold it there, up to twice the budget, beyond which the least
+  recently used go anyway. `evictions` / `freshEvictions` count them (a fresh eviction is a possible 404).
+* **Failures stay local.** A `dedupeUrl` that throws for one text keeps that text inline (trimmed) with a `#render`
+  warning; before the review it aborted `resolveStyles` and the page fell back to the complete stylesheets (11.5 MB on
+  the catalog). `hasRelativeUrl` also looks into `image-set()` / `-webkit-image-set()` / `src()`: a quoted argument at
+  the function's own level that is not absolute or a fragment keeps the sheet inline (conservative; `type("...")` and
+  nested `url()`s are left to their own rules).
+* **Demo route.** `/swc-css/` is mounted before the `compression` middleware and serves brotli / gzip bodies computed
+  once per hash (q4 / level 6, texts of 1 KB or more, bounded at 16 MiB of bodies), with the same `Content-Encoding`,
+  `Content-Length`, per-coding `ETag` and `Vary` for GET, HEAD and 304; behind the middleware a HEAD reported the
+  identity length without `Content-Encoding`, and 304s had no `Vary`.
+
+Sizes and bytes on the wire: "Performance" above has the table. Two observations decide where `'link'` helps: (1) with
+brotli on the wire the inline page is already small (its window spans the repeated sheets: trimmed button page
+846 KiB -> 12 KiB), so `'link'` mostly saves bytes before compression, parse work and memory; (2) the CSS of `full`
+pages is shared between pages and the CSS of trimmed / minified pages is not (`.probe/dedupe/cross-page.ts`, every
+catalog entry's own page: a warm cache saves 94 % of the linked CSS downloads in `full` mode, 21.2 MB summed per page
+vs 1.17 MB distinct, but 14 % trimmed and 2 % minified, whose texts are page-specific).
+
+**First frames** (`.probe/dedupe/first-frame.ts`: an init script counts, at every rendering opportunity, the hosts in
+the viewport that show content while one of their server links has no sheet; plus CDP screencast frames in Chromium.
+Re-checked on the integrated tree, trimmed button page with preload hints: Chromium 0 unstyled frames locally and with
+the CSS delayed 300 ms, cold and warm; Firefox 7 / 7 locally and 47 / 5 delayed, cold / warm):
+
+| Engine | Scenario | Unstyled frames |
+|---|---|---|
+| Chromium (Blink, also the headless shell of the e2e suite) | button and catalog; local, CSS delayed 300 ms / 1 s, slow 3G, 4G; cold and warm cache; preload / `not-all` / no hints; with and without the client | 0 in every run |
+| Firefox 157 (system install, WebDriver BiDi) | button, warm cache | 2-9 |
+| | button, cold, CSS delayed 300 ms / 1 s | 28-47 / 76-126 |
+| | catalog, warm / cold | 4-8 / 15-43 |
+| WebKit | - | not measured (Playwright 1.64 needs a WebKit build that is not installed) |
+
+Chromium's parser waits at a pending shadow-root `<link rel="stylesheet">` like at an in-body one (traced with every
+sheet delayed by 1 s: the body held 2 elements until the theme sheet arrived at 1093 ms, first paint at 1120 ms), so it never paints content without its CSS; the price is
+a progressive, later cold load: trimmed button page over a 150 ms round trip, DOMContentLoaded 178 ms inline, 493 ms
+linked cold, 187 ms warm (first contentful paint 200 / 364 / 192 ms; minified keeps first paint at about 188 ms, its
+theme is inline). The catalog with brotli on: emulated 4G DOMContentLoaded 3920 ms inline vs 4103 ms cold / 2918 ms warm,
+slow 3G 4399 ms vs 6844 ms cold / 3458 ms warm (about 120 sheet requests over HTTP/1.1). Firefox paints first: a
+geometry trace shows `sp-button` as a transparent 45x18 px block (`display: block`) until its sheet arrives, then its
+background transition (about 130 ms) runs from the unstyled value - on a warm cache 66 ms unstyled plus the fade.
+**Hence opt-in and off by default.** A mitigation was considered and not built: an inline `:host{display:none}` before
+the links and `:host{display:revert-layer}` prepended to every linked text (risks: content stays hidden when a sheet
+404s without JavaScript, outer display rules override the hider, extra client handling).
+
+**Script variant, rejected.** One inline script after each top-level element, the first instance of every sheet
+inline as its source and the others adopting a constructed sheet: without JavaScript the page is broken (94,489 px of
+the button page's first viewport and 136,546 px of the catalog's differ from full), it flashes where `'link'` does not
+in Chromium (catalog: 2 frames locally, 83 frames = 1.7 s over 4G with up to 61 hosts unstyled; in the demo the
+top-level element is `<sp-theme>`, so the script runs only after the whole page was parsed), and Firefox still flashes
+on the catalog (2-3 frames). Size: trimmed catalog 1973 KiB of HTML (146.8 KiB brotli).
+
+**Tests.** `tests/styles-dedupe.spec.ts` per entry of the smoke set (or `SWC_SSR_COMPONENTS`): `dedupe:static` (no
+JavaScript: `full` / `trimmed` / `minified` + `'link'` equal `full` inline at 0 px after one repaint - a linked page
+paints progressively and Chromium rasterizes a few anti-aliased corner pixels one level differently until the next
+repaint, probed: action-button minified 4 px without the repaint, 0 with it; every link loaded; the head preloads
+exactly the linked URLs; every URL immutable `text/css`, an unknown hash 404; the HTML smaller than inline),
+`dedupe:post` (hydrated, the held page and its release, and four state groups equal full; no server link or marked
+`<style>` left; every hydrated Lit element on adopted sheets), `dedupe:paint` (button, picker, tabs: 0 unstyled frames
+over a 150 ms round trip, cold and warm, with and without hints and client). `SWC_SSR_DEDUPE=0` skips it.
+`packages/swc-ssr/test/styles-dedupe.test.ts` (18): store / LRU and its protection period, hashing, `hasRelativeUrl`
+(also `image-set()` / `src()`), link placement and markers, a throwing `dedupeUrl`, `head`, reports.
 
 ## Coding conventions
 

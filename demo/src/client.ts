@@ -1,13 +1,21 @@
 import 'swc-ssr/client'; // must stay the FIRST import: installs lit's hydration support before lit / Spectrum load
-import {hydrateSpectrum, hydrationReport} from 'swc-ssr/client';
-import type {HydrateSpectrumOptions, HydrationReport} from 'swc-ssr/client';
-import {render} from 'lit';
-import {findEntry} from './catalog/index.js';
-import type {CatalogEntry} from './catalog/types.js';
-import {pageTemplate} from './page.js';
+import {hydrationReport} from 'swc-ssr/client';
+import type {HydrationReport} from 'swc-ssr/client';
 
 /**
- * Browser entry of the demo. `#app` is rendered by demo/src/server.ts:
+ * Browser entry of the demo (dist/client.js). It is a small bootstrap on purpose:
+ *
+ *   1. `swc-ssr/client` is its only static import. Evaluating it installs lit's hydration support (and the hooks
+ *      around it), which has to happen BEFORE `lit-element` creates the LitElement class.
+ *   2. The application (demo/src/client-app.ts: lit, the page template, the catalog, hydrateSpectrum()) is loaded with
+ *      `import()` afterwards. With code splitting a bundler may move any module that several chunks share into a
+ *      chunk that the entry imports FIRST; had `lit` been a static import of this file, `lit-element` would have been
+ *      evaluated before this file's own body - before hydration support existed. demo/build.mjs fails the build when
+ *      `lit-element` or a Spectrum module is part of the static import graph of this entry.
+ *   3. Everything that tests and applications hook into is set synchronously here, as it always was:
+ *      `window.__swcSsrHydration` exists as soon as the entry has run, although the application arrives a moment later.
+ *
+ * `#app` is rendered by demo/src/server.ts:
  *   data-mode="ssr"  server-rendered content inside #app  -> hydrate it
  *   data-mode="csr"  empty #app                           -> render the same template client-side (reference DOM)
  *   data-components  comma separated catalog entry names that are on the page
@@ -97,47 +105,10 @@ function failureReport(message: string): HydrationReport {
   return {...hydrationReport(), errors: [...hydrationReport().errors, message]};
 }
 
-async function start(): Promise<HydrationReport> {
-  if (!app) {
-    console.error('[swc-ssr demo] #app not found');
-    return failureReport('#app not found');
-  }
-
-  const params = new URLSearchParams(location.search);
-  const names = (app.dataset.components ?? '').split(',').filter((name) => name !== '');
-  const entries: CatalogEntry[] = [];
-  const unknown: string[] = [];
-  for (const name of names) {
-    const entry = findEntry(name);
-    if (entry) entries.push(entry);
-    else unknown.push(name);
-  }
-  if (unknown.length > 0) console.error(`[swc-ssr demo] unknown catalog entries: ${unknown.join(', ')}`);
-
-  // Registers every custom element the page needs. Elements still carry `defer-hydration`, so none of them
-  // hydrates before hydrateSpectrum() below says so.
-  await Promise.all(entries.map((entry) => entry.load()));
-  window.__swcSsrDefined = true;
-
-  if (mode === 'csr') {
-    render(pageTemplate(entries), app);
-    // Nothing to hydrate; this waits until every element has rendered, then counts the elements with a shadow root.
-    return hydrateSpectrum(app);
-  }
-
-  const delay = params.get('hydrateDelay');
-  if (delay === 'hold') {
-    await new Promise<void>((resolve) => (window.__swcSsrRelease = resolve));
-  } else if (Number(delay) > 0) {
-    await new Promise((resolve) => setTimeout(resolve, Number(delay)));
-  }
-  const options: HydrateSpectrumOptions = {removeServerStyles: params.get('removeStyles') === '1'};
-  if (params.get('agnostic') !== '1') options.template = pageTemplate(entries);
-  return hydrateSpectrum(app, options);
-}
-
-window.__swcSsrHydration = start().catch((error: unknown) => {
-  const message = `[swc-ssr demo] startup failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`;
-  console.error(message);
-  return failureReport(message);
-});
+window.__swcSsrHydration = import('./client-app.js')
+  .then((application) => application.start())
+  .catch((error: unknown) => {
+    const message = `[swc-ssr demo] startup failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`;
+    console.error(message);
+    return failureReport(message);
+  });

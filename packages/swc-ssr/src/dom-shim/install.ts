@@ -53,7 +53,7 @@ import {
   DOCUMENT_FRAGMENT_NODE,
   DOCUMENT_NODE,
 } from './nodes.js';
-import {closest, matches, queryAll, queryOne} from './select.js';
+import {closest, matches, queryAll, queryOne, setShimChildNodesGetter} from './select.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type AnyNode = any;
@@ -395,9 +395,14 @@ function installNodeExtras(): void {
   }
 
   // Structure (answered from the node's backing; empty without one).
-  defineIfAbsent(NodeProto, 'childNodes', getter(function () {
+  const childNodesGetter = getter(function () {
     return nodeList([...childList(this)]);
-  }));
+  });
+  defineIfAbsent(NodeProto, 'childNodes', childNodesGetter);
+  if (Object.getOwnPropertyDescriptor(NodeProto, 'childNodes')?.get === childNodesGetter.get) {
+    // Selector matching reads the backing directly where this getter answers `childNodes` (select.ts).
+    setShimChildNodesGetter(childNodesGetter.get);
+  }
   defineIfAbsent(NodeProto, 'firstChild', getter(function () {
     return childList(this)[0] ?? null;
   }));

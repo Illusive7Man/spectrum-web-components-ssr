@@ -62,7 +62,10 @@ export function summaryFile(): string {
  * `styles-release` the client's `removeServerStyles`, `styles-size` the CSS bytes. tests/styles-late.spec.ts adds
  * `styles-late` (a definition held back until after hydration, `?late=<tag>`: trimmed / minified equal full before and
  * after it arrives), `styles-app-mod` (an application stylesheet that sets Spectrum's `--mod-*` hooks) and
- * `styles-no-cssom` (swc-ssr/client on its path for browsers without constructable stylesheets).
+ * `styles-no-cssom` (swc-ssr/client on its path for browsers without constructable stylesheets). tests/styles-dedupe.spec.ts
+ * (`StyleOptions.dedupe: 'link'`) adds `styles-dedupe` (no JavaScript: linked pages equal full, the linked URLs and head
+ * hints), `styles-dedupe-post` (held, hydrated and state-changed linked pages equal full; no server style left) and
+ * `styles-dedupe-paint` (first frames on a cold / warm cache: no content painted without its sheet).
  */
 export type CheckName =
   | 'ssr'
@@ -84,7 +87,10 @@ export type CheckName =
   | 'styles-size'
   | 'styles-late'
   | 'styles-app-mod'
-  | 'styles-no-cssom';
+  | 'styles-no-cssom'
+  | 'styles-dedupe'
+  | 'styles-dedupe-post'
+  | 'styles-dedupe-paint';
 export type CheckStatus = 'pass' | 'fail' | 'skip';
 export type MetricValue = string | number | boolean | null;
 export type Metrics = Record<string, MetricValue>;

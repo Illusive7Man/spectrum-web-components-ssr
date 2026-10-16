@@ -543,6 +543,59 @@ registerHydrationAdapter({
 });
 
 /**
+ * Elements that render from a layout measurement cached in `boundingClientRect`: `sp-color-area`
+ * (`color-area/src/ColorArea.js`: the handle's `style="transform: translate(...)"` from the content box) and
+ * `sp-color-wheel` (`color-wheel/src/ColorWheel.js`: diameter, clip paths and handle transform); found by shape
+ * (`getContentBoundingRect()` / `cacheLayoutData()`), so subclasses count. The server has no layout: it renders the
+ * area unmeasured (handle at 0, 0) and the wheel at its token size (server adapter `color-wheel.ts`).
+ *
+ * Their own `connectedCallback()` runs at the upgrade, also while the element still carries `defer-hydration`, and
+ * starts a ResizeObserver that stores a measurement and requests an update. When a rendering opportunity passes
+ * between the definition and the hydrating update (definitions arriving in separate chunks, `hydrateSpectrum()`
+ * called later), the hydrating render uses that measurement, and lit's `hydrate()` primes attribute bindings with
+ * their first client value without writing them (they are assumed to equal the server markup): the DOM keeps the
+ * server's `style` until the value changes again, so the color-area handle stayed in the corner (the catalog page,
+ * 11 of 14 loads with the split demo bundle; every load with `?hydrateDelay=300`). The adapter hides the measurement
+ * for the hydrating update and gives it back right after it: the hydrating render matches the server markup. Right
+ * after the hydrating update it requests one more update (also when nothing was measured before): `firstUpdated()`
+ * measures the element synchronously after the hydrating update, and that update writes the measured layout at once
+ * instead of with the observer's first callback a frame or more later (the handle used to sit in the corner for that
+ * long after hydration; client-side rendering has the same unmeasured first frame).
+ */
+const LAYOUT_MEASUREMENT = 'boundingClientRect';
+const hiddenMeasurements = new WeakMap<object, unknown>();
+const rendersFromMeasurement = (element: any): boolean =>
+  typeof element.getContentBoundingRect === 'function' || typeof element.cacheLayoutData === 'function';
+registerHydrationAdapter({
+  tag: /^/,
+  beforeHydrate(element) {
+    if (!rendersFromMeasurement(element)) {
+      return;
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(element, LAYOUT_MEASUREMENT);
+    if (!descriptor || !('value' in descriptor) || !descriptor.writable || descriptor.value == null) {
+      return;
+    }
+    hiddenMeasurements.set(element, descriptor.value);
+    (element as any)[LAYOUT_MEASUREMENT] = undefined;
+  },
+  afterHydrate(element) {
+    if (!rendersFromMeasurement(element)) {
+      return;
+    }
+    const measured = element as any;
+    if (hiddenMeasurements.has(element)) {
+      const rect = hiddenMeasurements.get(element);
+      hiddenMeasurements.delete(element);
+      if (measured[LAYOUT_MEASUREMENT] === undefined) {
+        measured[LAYOUT_MEASUREMENT] = rect;
+      }
+    }
+    measured.requestUpdate?.();
+  },
+});
+
+/**
  * `sp-menu` / `sp-menu-group` and every element built on `Menu` (`menu/src/Menu.js`; found by shape, so subclasses
  * count): hydrated more than a frame after its items were defined, it never finishes updating, and neither does
  * anything that awaits it (`sp-picker`, `sp-action-menu`, `sp-combobox`; `hydrateSpectrum()` then waits out its

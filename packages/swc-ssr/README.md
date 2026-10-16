@@ -81,7 +81,7 @@ element registry are process-wide.
 | `lazyDefinitionWaitMs` | `250` | how long to wait for definitions that components import lazily (`sp-slider` imports `sp-number-field` in `render()`), once per tag and process: tags still undefined when the wait ends are never waited for again. Never beyond `timeoutMs`. `0` disables the wait; `Infinity` waits up to the render's deadline (when it passes, that render returns its first-pass output with a warning; a client-only element that is never defined on the server costs this once per process). Without a deadline (`timeoutMs: 0`), `Infinity` means the default 250 ms. |
 | `deterministicIds` | `true` | Spectrum's `randomID()` ids are deterministic per render. `false` uses the CSPRNG for this render. Note: every plain `Uint8Array(4)` `getRandomValues` request made synchronously during a render gets deterministic bytes (the shape of `randomID()`'s request), also from your own template code; never use such bytes for secrets there, or turn this off. |
 | `debug` | `false` | keep the `data-swc-ssr` markers and log details. |
-| `styles` | `{mode: 'full'}` | the CSS of the declarative shadow roots. `{mode: 'trimmed'}` keeps only what the rendered page can use; see [Smaller pages](#smaller-pages-trimmed-css). Trimmed pages require `swc-ssr/client`. |
+| `styles` | `{mode: 'full'}` | the CSS of the declarative shadow roots. `{mode: 'trimmed'}` keeps only what the rendered page can use; see [Smaller pages](#smaller-pages-trimmed-css). Trimmed pages require `swc-ssr/client`. `{dedupe: 'link'}` (any mode) links one copy of each stylesheet instead of repeating it; see [One copy per stylesheet](#one-copy-per-stylesheet-dedupe-link). |
 
 ### Smaller pages: trimmed CSS
 
@@ -103,7 +103,7 @@ const {html: markup, report} = await renderSpectrum(page(), {
     minifyCustomProperties: true,                     // optional: short custom-property names
   },
 });
-console.log(report.styles); // {mode, sheets: [{id, tag, instances, fullBytes, trimmedBytes}], fullBytes, trimmedBytes, durationMs}
+console.log(report.styles); // {mode, sheets: [{id, tag, instances, fullBytes, trimmedBytes, hash?}], fullBytes, trimmedBytes, durationMs, dedupe?}
 ```
 
 | Option | Default | Meaning |
@@ -112,11 +112,13 @@ console.log(report.styles); // {mode, sheets: [{id, tag, instances, fullBytes, t
 | `trimTheme` | `true` | prune the theme's custom-property declarations nothing on the page uses. |
 | `references` | none | custom-property names (or `--prefix-*`) your own CSS uses: kept with their dependencies, never renamed. A single string is one entry. |
 | `undefinedPrefixes` | `[]` | prefixes your app never defines, e.g. `['--mod-']`: `var(--mod-x, V)` becomes `V`. |
-| `minifyCustomProperties` | `false` | rename custom properties to `--a`, `--b`, ...: names only the theme defines, or that live inside one component's stylesheets. Never Spectrum's public `--mod-*` / `--highcontrast-*` / `--system-*` (your overrides keep working), never names one component defines for another. Unsafe when your app sets or reads `--spectrum-*` itself without listing them in `references`. |
+| `minifyCustomProperties` | `false` | rename custom properties to `--a`, `--b`, ...: names only the theme defines, or that live inside one component's stylesheets. Never Spectrum's public `--mod-*` / `--highcontrast-*` / `--system-*` (your overrides keep working), never names one component defines for another, or that another component's complete stylesheet uses. Unsafe when your app sets or reads `--spectrum-*` itself without listing them in `references`. |
 | `keep` | none | selectors (substring or RegExp) whose rules are always kept. |
+| `dedupe` | `'none'` | `'link'`: every distinct stylesheet text is stored once and linked from each shadow root; see [One copy per stylesheet](#one-copy-per-stylesheet-dedupe-link). Works in `full` mode too. |
+| `dedupeUrl` | `/swc-css/<hash>.css` | with `dedupe: 'link'`: `(hash, css) => url` of a stored text (e.g. to upload it to a CDN). |
 
-Measured: button page 1.22 MB -> 0.83 MB trimmed -> 0.47 MB minified (gzip 120 -> 79 -> 15 KB); picker 1.32 -> 0.52 ->
-0.38 MB; the whole 59-component catalog 18.66 -> 13.31 -> 9.03 MB. Trimming takes 9-23 ms on a one-component page and
+Measured: button page 1.22 MB -> 0.83 MB trimmed -> 0.47 MB minified (gzip 120 -> 79 -> 15 KB, brotli 44 -> 12 -> 10 KB);
+picker 1.32 -> 0.52 -> 0.39 MB; the whole 59-component catalog 18.66 -> 13.31 -> 9.10 MB. Trimming takes 9-23 ms on a one-component page and
 about half a second on the catalog. Every `<style>` the trimmer changed carries `data-swc-styles="trimmed"` /
 `"minified"` (`STYLE_MARKER_ATTRIBUTE`).
 
@@ -127,7 +129,10 @@ the complete theme when it upgrades. Without the client a trimmed page breaks on
 `swc-ssr/client` gives every hydrated element its class's complete stylesheets back in the same task as its hydrating
 update, on both the template and the agnostic path, and keeps the server's theme `<style>` until the last element is
 restored, and only from themes that have upgraded (a theme defined late, or never, keeps its server CSS; minified
-elements wait for it). What else trimming can break (application CSS that reads theme variables, state changes before
+elements wait for it). While `sp-theme` is undefined, content created on the client lacks the theme values the server
+left out; `hydrateSpectrum()` warns `theme pending: ...`. If your app defines `sp-theme` late, use `trimTheme: false`
+and no minification. Define `sp-theme` after its theme fragments, and parent components before their children
+(`sp-sidenav` before `sp-sidenav-item`), in one task when you split your bundle. What else trimming can break (application CSS that reads theme variables, state changes before
 hydration, minification and app-defined `--spectrum-*` overrides): see docs/API.md "Styles" in the repository. Two
 things to know:
 
@@ -140,6 +145,49 @@ things to know:
   Otherwise the server writes the original names, the client's `<sp-theme>` defines the renamed ones when it upgrades,
   and the page that looked right from the server goes unstyled at hydration. `minifyCustomProperties` handles both
   sides and is the supported way to get short names.
+
+### One copy per stylesheet: `dedupe: 'link'`
+
+Every shadow root carries its own `<style>` copy of its component's stylesheets: the button page repeats one 36 KB
+`sp-button` sheet 21 times, the catalog carries 0.6-1.9 MB of distinct CSS in 1346 copies. `styles: {dedupe: 'link'}`
+stores every distinct text once (`styleSheetStore`, keyed by a content hash) and writes
+`<link rel="stylesheet" href="/swc-css/<hash>.css" data-swc-styles="...">` into the shadow roots instead. Serve the store
+and put `head` (preload hints) into your page's `<head>`:
+
+```ts
+import {getStyleSheet, renderSpectrum} from 'swc-ssr/server';
+
+app.get('/swc-css/:file', (req, res) => {
+  const css = getStyleSheet(req.params.file.replace(/\.css$/, ''));
+  if (css === undefined) return void res.status(404).set('Cache-Control', 'no-store').end();
+  res.set('Cache-Control', 'public, max-age=31536000, immutable').type('text/css; charset=utf-8').send(css);
+});
+
+app.get('/', async (_req, res) => {
+  const {html: markup, head} = await renderSpectrum(page(), {deferHydration: true, lang: 'en', styles: {mode: 'trimmed', dedupe: 'link'}});
+  res.type('html').send(`<!doctype html><html lang="en"><head>${head}...</head><body>${markup}...</body></html>`);
+});
+```
+
+It is off by default because browsers differ: Chromium waits in the parser for a shadow root's pending stylesheet link
+and never paints unstyled content (a cold load renders progressively and finishes once the sheets arrived); Firefox
+paints the content first and styles it when the sheet arrives - for a few frames even from a warm cache. The store is
+per process and bounded (32 MiB LRU; a text a render linked is kept for at least 60 s, `minLifetimeMs`): with several
+server instances, write the texts to shared storage through `dedupeUrl` (a `dedupeUrl` that throws keeps that text
+inline and reports it). Minified theme sheets, sheets under 160 bytes and sheets with relative URLs (`url()`,
+`@import`, `image-set()`, `src()`) stay inline.
+`swc-ssr/client` handles the links like the server `<style>` elements. Sizes and the measurements: docs/API.md "Styles"
+and docs/DESIGN.md "Style de-duplication" in the repository.
+
+### Performance
+
+A render is synchronous CPU work, queued one at a time per process, and the whole page is rendered before
+`renderSpectrum()` resolves. Measured on a 15 W laptop CPU (0.3.0; 0.2.1 in brackets): the button page 21 ms (30 ms),
+the picker page 48 ms (62 ms), the 1349-element catalog page 1.9 s (3.8 s) in `full` mode and 2.2 s (2.5-2.6 s) trimmed
+or minified - about 0.65-1.6 ms per element. The output is identical to 0.2.2 apart from generated ids. Heap after GC
+stays flat over repeated renders (111-114 MB for the catalog). A long render blocks its process's event loop (rendering
+in `worker_threads` workers is not tested here). Serve the HTML compressed - brotli if you can: its window spans the
+stylesheet copies of the shadow roots (button page 1253 KB -> 44 KB), gzip's 32 KB window does not (121 KB).
 
 ### Adapters
 

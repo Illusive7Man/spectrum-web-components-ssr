@@ -10,11 +10,12 @@ From the repository root:
 
 ```sh
 npm run demo        # builds the client bundle, then starts the server
-npm run demo:dev    # starts the server only (reuses an existing demo/public/dist/client.js)
-npm run build:client   # rebuilds demo/public/dist/client.js only
+npm run demo:dev    # starts the server only (reuses an existing demo/public/dist/)
+npm run build:client   # rebuilds demo/public/dist/ only
 ```
 
-Open <http://localhost:3000/>. `PORT=4000 npm run demo` changes the port.
+Open <http://localhost:3000/>. `PORT=4000 npm run demo` changes the port; `SWC_SSR_DEMO_DIST=<dir>` makes the build
+write (and wipe) another directory instead of `demo/public/dist`, and the server serve it.
 
 The server logs one line per request, including the render time, for example:
 
@@ -22,7 +23,53 @@ The server logs one line per request, including the render time, for example:
 [demo] GET /component/button -> 200 in 41.7 ms | render 38.2 ms (renderSpectrum 35.9 ms), 7 elements, 0 errors, 0 fallbacks, lang en-US, styles full n/a
 ```
 
-(`styles trimmed 823.6/1230.5 KB` with `?styles=trimmed`: trimmed / full CSS of the page.)
+(`styles trimmed 823.6/1230.5 KB` with `?styles=trimmed`: trimmed / full CSS of the page; with `?dedupe=link` also
+`, linked 12 sheets 77.0 KB (62 links)`: the distinct stylesheets the page links to.) Requests for `/dist/*` and
+successful ones for `/swc-css/*` are not logged.
+
+## Production setup: compression and a split bundle
+
+The demo serves its pages the way a production server would, because the size of the markup is the point:
+
+* **Compression.** HTML, JSON and the linked stylesheets are compressed on the fly (`compression`): brotli at quality 4
+  preferred over gzip (the client's q-values are honoured), nothing under 1 KB, `Vary: Accept-Encoding` always. A
+  server-rendered page repeats each component's stylesheet in every shadow root; brotli's window spans those copies,
+  gzip's 32 KB window does not. Bytes on the wire of the HTML (measured: docs/DESIGN.md "Performance" has the full
+  table):
+
+  | Page | identity | gzip | brotli |
+  |---|---|---|---|
+  | `/component/button` full | 1253 KB | 121 KB | 44 KB |
+  | `/component/button?styles=minified` | 478 KB | 15 KB | 10 KB |
+  | `/component/button?styles=trimmed&dedupe=link` | 28 KB (+ 77 KB CSS, cached) | 3 KB (+ 12 KB) | 3 KB (+ 12 KB) |
+  | `/` full | 19106 KB | 1489 KB | 255 KB |
+  | `/?styles=minified` | 9324 KB | 644 KB | 156 KB |
+  | `/?styles=trimmed&dedupe=link` | 1170 KB (+ 823 KB CSS) | 88 KB (+ 136 KB) | 62 KB (+ 139 KB) |
+
+* **Code-split, minified client.** `build.mjs` (esbuild) writes `dist/client.js`, a 1.2 KB bootstrap, and content-hashed
+  chunks in `dist/chunks/` (the application `client-app-*.js`, one `register-<entry>-*.js` per catalog entry, shared
+  modules), with source maps and build-time `.br` (q11) / `.gz` (9) siblings for every script of 1 KB or more. The
+  server sends those siblings with `Content-Encoding` (identical `Content-Type`, ETag / 304 / HEAD work), the chunks
+  with `Cache-Control: public, max-age=31536000, immutable`, `client.js` with `no-cache`. A component page downloads
+  67-125 KB of JavaScript over the wire (483-743 KB decoded, 21-54 files) instead of the 2548 KB single file of 0.2.x;
+  the whole catalog page 364 KB (1997 KB, 171 files).
+* **Evaluation order.** `client.ts` statically imports only `swc-ssr/client` (Lit's hydration support must exist before
+  `lit-element` creates `LitElement`) and loads `client-app.ts` with `import()`. The build fails when `lit-element` or a
+  Spectrum module is in the entry's static import graph (a bundler may hoist shared modules into a chunk the entry
+  imports first), and prints the evaluation order.
+* **Registration modules.** Plain per-module `import()` chunks raced: `sp-sidenav-item` defined before `sp-sidenav`
+  threw `startTrackingSelectionForItem is not a function` in about 15 % of loads, and combobox / sidenav items ended with
+  roving `tabindex="-1"`. A plugin in `build.mjs` turns each entry's `load()` into one module of static imports in the
+  order `load()` lists them, so an entry's elements are defined in one task, in that order (the files still download in
+  parallel). Rule for catalog entries: keep `async load() { await Promise.all([import('...'), ...]); },` (or awaited
+  single `import('...')` calls) with plain string literals only; the build fails with a message otherwise.
+  `catalog/page-theme-register.ts` likewise imports the theme fragments before `sp-theme`: defining `sp-theme` first
+  empties its declarative shadow root before any fragment is registered and paints an unthemed frame (CLS 0.032 on the
+  badge page).
+
+On localhost without throttling the split bundle hydrates somewhat later than the single file did (more requests, an
+import waterfall about 5 levels deep); over a 10 Mbit/s, 40 ms link it hydrates much sooner (numbers: docs/DESIGN.md
+"Performance").
 
 ## Routes
 
@@ -35,17 +82,21 @@ The server logs one line per request, including the render time, for example:
 | `?agnostic=1` on an SSR route | Hydrates with the framework-agnostic path instead of the template path (see below) |
 | `?styles=full\|trimmed\|minified` on an SSR route | Server CSS: `full` (default), `trimmed` (`renderSpectrum({styles: {mode: 'trimmed'}})`), `minified` (trimmed + `minifyCustomProperties`). Anything else: 400 |
 | `?refs=--a,--b,--prefix-*` on an SSR route | `StyleOptions.references` (custom properties the page's own CSS uses). Invalid names: 400 |
+| `?dedupe=link` on an SSR route (any `?styles=`) | `StyleOptions.dedupe: 'link'`: one copy per distinct stylesheet, linked from every shadow root (`/swc-css/<hash>.css`), and preload hints in `<head>`. `?dedupe=none` (default) inlines; anything else: 400 |
+| `?hints=preload\|not-all\|none` with `?dedupe=link` | What `<head>` announces: `<link rel="preload" as="style">` (default), `<link rel="stylesheet" media="not all">`, or nothing |
+| `GET /swc-css/<hash>.css` | A stylesheet a `?dedupe=link` render linked (`src/styles-routes.ts`): `text/css`, `Cache-Control: public, max-age=31536000, immutable`, brotli / gzip compressed once per hash (the route sits before the compression middleware; GET, HEAD and 304 carry the same `Content-Encoding`, `ETag` and `Vary`); an unknown hash (never rendered by this process, or evicted) is a 404 with `no-store` |
 | `?removeStyles=1` on an SSR route | The client calls `hydrateSpectrum(app, {removeServerStyles: true})` |
 | `?hydrateDelay=<ms>` / `?hydrateDelay=hold` on an SSR route | The client calls `hydrateSpectrum()` that much later than the definitions loaded, or when the page calls `window.__swcSsrRelease()` (the state of an app with a late bootstrap; `window.__swcSsrDefined` is true once the definitions loaded) |
 | `?late=<tag>[,<tag>...]` on an SSR route | The client holds `customElements.define()` of these tags back until the page calls `window.__swcSsrDefineLate()` (resolves when they are defined and the page settled): definitions that arrive after hydration, or never. `hydrateSpectrum()` waits its timeout for them, warns, and hydrates the rest |
 | `?lang=<tag>` on SSR and CSR routes | Page language (e.g. `?lang=de`). Without it, the request's most preferred `Accept-Language` language, else `en`. Passed to `renderSpectrum({lang})` and written to `<html lang>`, so the client formats like the server |
-| `HEAD` on any path | 200 with an empty body, never renders (health checks / preview monitors). Logged once, then as a per-minute count |
+| `HEAD` on any path except `/dist/*` and `/swc-css/*` | 200 with an empty body, never renders (health checks / preview monitors). Logged once, then as a per-minute count. `HEAD /dist/*` and `/swc-css/*` answer like the `GET` without the body |
 | `GET /report.json` | `RenderReport` of the last SSR render (per element id: tag, errors, warnings, fallback), plus `loadErrors`. `?component=<name>` (or `*` for the whole catalog) returns the last report of that page, which is race-free when pages are rendered in parallel |
-| `GET /styles.json?component=<name\|*>&styles=<mode>` | Renders the page on demand (leaves `/report.json` alone) and returns the CSS sizes: `report.styles` (`fullBytes`, `trimmedBytes`, `sheets`, `durationMs`) plus the measured `<style>` text (`cssBytes`), document and gzip sizes |
+| `GET /styles.json?component=<name\|*>&styles=<mode>` | Renders the page on demand (leaves `/report.json` alone) and returns the CSS sizes: `report.styles` (`fullBytes`, `trimmedBytes`, `sheets`, `durationMs`) plus the measured `<style>` text (`cssBytes`), document and gzip sizes (`gzipBytes`: gzip of the uncompressed document, unrelated to the response's own compression). With `&dedupe=link`: `dedupe` (the linked texts: hash, url, bytes, links) and `sheets[].hash`; `cssBytes` then counts the CSS left inline |
 | `GET /catalog.json` | `[{name, interactive, notes}]` for every catalog entry |
-| `GET /dist/*` | Static files from `demo/public/dist` (the client bundle and its source map) |
+| `GET /dist/*` | Static files from `demo/public/dist` (the split client bundle): precompressed `.br` / `.gz` for clients that accept them, `dist/chunks/*` immutable, `client.js` revalidated (`no-cache`) |
 
-HTML is sent with `Cache-Control: no-store`; the server-timing header `Server-Timing: ssr;dur=...` carries the render time.
+HTML is sent with `Cache-Control: no-store` (compressed when the client accepts it); the server-timing header
+`Server-Timing: ssr;dur=...` carries the render time.
 Renders run one at a time (the DOM shim and the element registry are process-wide state).
 On `/`, a catalog entry whose `load()` throws is left out of the page and listed in `/report.json` under `loadErrors`
 (`#app`'s `data-components` only names the entries that are on the page, so the client stays consistent with the server);
@@ -54,7 +105,7 @@ On `/`, a catalog entry whose `load()` throws is left out of the page and listed
 ## Page shell
 
 ```html
-<!doctype html><html lang="en"><!-- the page language --><head>... <style>/* layout only, see layoutCss in src/page.ts */</style></head>
+<!doctype html><html lang="en"><!-- the page language --><head>... <!-- ?dedupe=link: stylesheet preload hints --><style>/* layout only, see layoutCss in src/page.ts */</style></head>
 <body>
   <div id="app" data-mode="ssr" data-components="accordion,button">
     <!-- renderSpectrum(pageTemplate(entries)) -->
@@ -70,7 +121,8 @@ The client reads `data-mode` (`ssr` | `csr`) and `data-components` from `#app`.
 
 ## How hydration works
 
-`src/client.ts` imports `swc-ssr/client` **first**. That module
+`src/client.ts` imports `swc-ssr/client` **first** (its only static import; the application, `src/client-app.ts`,
+follows with `import()`). That module
 
 1. imports `@lit-labs/ssr-client/lit-element-hydrate-support.js`, which has to run before `lit` creates `LitElement`:
    afterwards every Lit element honours the `defer-hydration` attribute and adopts its declarative shadow root instead of
@@ -137,9 +189,12 @@ const report = await page.evaluate(() => window.__swcSsrHydration);
 | File | Purpose |
 |---|---|
 | `src/ssr-setup.ts` | installs the DOM shim (`installSpectrumSsr()`), imported first by the server |
-| `src/server.ts` | express app, routes above |
+| `src/server.ts` | express app, routes above, compression and the precompressed `/dist` handler |
+| `src/styles-routes.ts` | `?dedupe=` / `?hints=` parsing and `GET /swc-css/<hash>.css` (`StyleOptions.dedupe: 'link'`) |
 | `src/page.ts` | `pageTemplate(entries)` and the layout CSS of the shell |
-| `src/client.ts` | browser entry: load the entries, hydrate or render |
+| `src/client.ts` | browser entry: a 1.2 KB bootstrap that imports `swc-ssr/client`, sets the test hooks and loads `client-app.ts` |
+| `src/client-app.ts` | the application: loads the page's entries, hydrates or renders |
 | `src/catalog/` | one showcase module per component package, `index.ts` exports `catalog` and `findEntry` |
-| `build.mjs` | esbuild: `src/client.ts` -> `public/dist/client.js` (ESM, source map, no `development` condition) |
+| `src/catalog/page-theme.ts`, `page-theme-register.ts` | the shell's `sp-theme` and its light / medium fragments (fragments registered first) |
+| `build.mjs` | esbuild: minified, code-split ESM (`public/dist/client.js` + `public/dist/chunks/`), source maps, precompressed `.br` / `.gz`, one ordered registration chunk per catalog entry, an evaluation-order check; no `development` condition |
 | `public/dist/` | build output (git-ignored) |

@@ -76,7 +76,7 @@ export function timerDelay(ms: number): number | undefined {
   return ms > MAX_TIMER_DELAY ? undefined : Math.max(ms, 1);
 }
 
-/** FNV-1a hash of a string (used to seed pass 2 from the pass-1 HTML). */
+/** FNV-1a hash of a string (32 bits, unsigned; e.g. the static-attribute part of element keys). */
 export function hashString(text: string): number {
   let hash = 0x811c9dc5;
   for (let i = 0; i < text.length; i++) {
@@ -84,6 +84,25 @@ export function hashString(text: string): number {
     hash = Math.imul(hash, 0x01000193);
   }
   return hash >>> 0;
+}
+
+/**
+ * `hashString(attributes).toString(36)` per canonical static-attribute string (`nextKey`), cached: the same strings
+ * come back for every element of a template in every pass and render. Bounded (cleared when full): a pure cache of
+ * template text, nothing of a render.
+ */
+const staticAttributeHashes = new Map<string, string>();
+
+function staticAttributesHash(attributes: string): string {
+  let hash = staticAttributeHashes.get(attributes);
+  if (hash === undefined) {
+    if (staticAttributeHashes.size >= 4096) {
+      staticAttributeHashes.clear();
+    }
+    hash = hashString(attributes).toString(36);
+    staticAttributeHashes.set(attributes, hash);
+  }
+  return hash;
 }
 
 /** A queued animation frame and the render scope of the code that requested it (the callback runs in it). */
@@ -281,7 +300,7 @@ export class RenderContext {
       counters = new Map();
       this.counters.set(scope, counters);
     }
-    const name = staticAttributes ? `${tag}#${hashString(staticAttributes).toString(36)}` : tag;
+    const name = staticAttributes ? `${tag}#${staticAttributesHash(staticAttributes)}` : tag;
     const ordinal = counters.get(name) ?? 0;
     counters.set(name, ordinal + 1);
     return `${scope}>${name}:${ordinal}`;

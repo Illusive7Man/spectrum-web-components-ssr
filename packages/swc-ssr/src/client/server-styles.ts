@@ -44,6 +44,10 @@
  *    last marked `<style>` (confirmed by a scan of the document), or at the end of `hydrateSpectrum()` when none is
  *    left - but only from themes that have upgraded: the server `<style>` of a theme that has not (its definition
  *    loads late, or never) is all the theme has and stays where the server put it (its upgrade clears it anyway).
+ *  - `StyleOptions.dedupe: 'link'` (0.3.0): the server writes `<link rel="stylesheet" data-swc-styles="trimmed|
+ *    minified|complete">` in place of (some of) those `<style>`s; such a `<link>` counts as a marked server `<style>`
+ *    everywhere here (restored, removed, kept, counted), except that it is never bridged (theme sheets that need the
+ *    bridge - minified ones - stay inline) and that `'complete'` is not partial (`pendingTrimmedThemes`).
  *  - `pendingTrimmedThemes()`, at the end of `hydrateSpectrum()` (0.2.2): such a theme defines only what the server
  *    kept (`trimTheme`) under the names it chose (`minifyCustomProperties`), so content created on the client and
  *    states entered later lack theme values until `sp-theme` is defined; `hydrateSpectrum()` reports it as a warning
@@ -85,12 +89,20 @@ const supportsAdoptingStyleSheets = (): boolean =>
   'replaceSync' in CSSStyleSheet.prototype;
 
 /**
+ * `data-swc-styles` value of a server `<link>` (`StyleOptions.dedupe: 'link'`, 0.3.0) to a stylesheet nothing was
+ * taken from: marked so that the element is restored and the `<link>` removed like a partial `<style>`, but not
+ * partial itself (a theme on it is complete).
+ */
+const COMPLETE = 'complete';
+
+/**
  * The `<style>` elements the server put into a declarative shadow root: the direct `<style>` children that come before
  * the root's first `<!--lit-part-->` marker (the server writes the element's styles first, then its render result; a
- * `<style>` in the render result itself belongs to a template part and stays). `<sp-theme>`'s shadow root has no
- * markers: all of its direct `<style>` children are the server's. Indexes the live `childNodes` and stops at the
- * marker (no `Array.from()` copy of every child: this runs for every shadow root at load and for every hydrated
- * element).
+ * `<style>` in the render result itself belongs to a template part and stays), and (0.3.0, `dedupe: 'link'`) the
+ * direct `<link data-swc-styles>` children there, which stand for a server `<style>` each. `<sp-theme>`'s shadow root
+ * has no markers: all of its direct `<style>` (and marked `<link>`) children are the server's. Indexes the live
+ * `childNodes` and stops at the marker (no `Array.from()` copy of every child: this runs for every shadow root at load
+ * and for every hydrated element).
  */
 function serverStyleElements(root: ShadowRoot): Element[] {
   const found: Element[] = [];
@@ -100,7 +112,11 @@ function serverStyleElements(root: ShadowRoot): Element[] {
     if (node.nodeType === 8 && (node as Comment).data.startsWith('lit-part')) {
       break;
     }
-    if (node.nodeType === 1 && (node as Element).localName === 'style') {
+    if (node.nodeType !== 1) {
+      continue;
+    }
+    const name = (node as Element).localName;
+    if (name === 'style' || (name === 'link' && (node as Element).hasAttribute(SERVER_STYLES_ATTRIBUTE))) {
       found.push(node as Element);
     }
   }
@@ -109,6 +125,9 @@ function serverStyleElements(root: ShadowRoot): Element[] {
 
 const isMarked = (style: Element): boolean => style.hasAttribute(SERVER_STYLES_ATTRIBUTE);
 const isMinified = (style: Element): boolean => style.getAttribute(SERVER_STYLES_ATTRIBUTE) === MINIFIED;
+/** Marked and not complete: the server left something out of it (trimmed) or renamed it (minified). */
+const isPartial = (style: Element): boolean => isMarked(style) && style.getAttribute(SERVER_STYLES_ATTRIBUTE) !== COMPLETE;
+const isStyleElement = (element: Element): boolean => element.localName === 'style';
 
 /* -------------------------------------------------------------------------------------------------------------- *
  * The class's own styles
@@ -326,7 +345,8 @@ export const THEME_PENDING_WARNING = 'theme pending: sp-theme not defined; trimm
 
 /**
  * Number of `<sp-theme>` elements (light DOM and open shadow roots) that have not upgraded - `sp-theme` is defined late,
- * or never - while their declarative shadow root still holds a marked server `<style>`. Such a theme provides only
+ * or never - while their declarative shadow root still holds a trimmed or minified server `<style>` (or `<link>`,
+ * `dedupe: 'link'`; a `'complete'` one is the whole theme). Such a theme provides only
  * what the server kept: the theme properties the server-rendered markup used (`trimTheme`), under the short names
  * (`minifyCustomProperties`). Content created on the client (an `sp-table`'s checkbox cells, a pending button's
  * progress circle, overlays), states entered later and restored elements reading names the server pruned or renamed
@@ -342,7 +362,7 @@ export function pendingTrimmedThemes(): number {
   }
   let pending = 0;
   eachShadowRoot(document, (host, root) => {
-    if (isTheme(host) && !isUpgraded(host) && serverStyleElements(root).some(isMarked)) {
+    if (isTheme(host) && !isUpgraded(host) && serverStyleElements(root).some(isPartial)) {
       pending++;
     }
   });
@@ -371,7 +391,13 @@ export function bridgeServerThemes(): void {
       }
       trimmedPage = true;
       if (isTheme(host)) {
-        found.push({host, styles: marked, reinserted: false});
+        // Only `<style>` elements are bridged. A theme `<link>` (`dedupe: 'link'`) is never minified - the server keeps
+        // minified theme sheets inline -, so it defines original names, which the upgraded theme defines completely;
+        // re-inserting it would also have the browser process the link again (not synchronously).
+        const styles = marked.filter(isStyleElement);
+        if (styles.length > 0) {
+          found.push({host, styles, reinserted: false});
+        }
       } else {
         pending += marked.length;
       }
@@ -528,9 +554,18 @@ function settleServerStyles(element: Element, hydrated: boolean): boolean {
           keepUntilSettled(element, serverStyles, marked);
           return true;
         }
-        serverStyles[0]!.textContent = text;
-        serverStyles[0]!.removeAttribute(SERVER_STYLES_ATTRIBUTE);
-        serverStyles.slice(1).forEach((style) => style.remove());
+        const first = serverStyles[0]!;
+        if (isStyleElement(first)) {
+          first.textContent = text;
+          first.removeAttribute(SERVER_STYLES_ATTRIBUTE);
+          serverStyles.slice(1).forEach((style) => style.remove());
+        } else {
+          // A server `<link>` (`dedupe: 'link'`) comes first: a new `<style>` takes its place.
+          const complete = document.createElement('style');
+          complete.textContent = text;
+          first.before(complete);
+          serverStyles.forEach((style) => style.remove());
+        }
         markedStylesRemoved(marked);
         return true;
       }

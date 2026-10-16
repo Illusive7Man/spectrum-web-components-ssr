@@ -4,7 +4,8 @@
  * through `getAttribute`, so selectors see the current state of an element (e.g. `[role="tab"]` set by a
  * component in its `connectedCallback`), not the state of the HTML it was parsed from.
  */
-import {selectAll, selectOne, is, type Options} from 'css-select';
+import {selectAll, selectOne, is, compile, _compileUnsafe, type Options} from 'css-select';
+import {BACKING, type StructureBacking} from './hooks.js';
 
 type Adapter<N, E extends N> = NonNullable<Options<N, E>['adapter']>;
 
@@ -13,9 +14,53 @@ type AnyNode = any;
 
 const ELEMENT_NODE = 1;
 
+/** The `childNodes` getter of the shim extras (install.ts), when they installed it. */
+let shimChildNodes: unknown;
+
+/** Called by install.ts once its `childNodes` getter (a copy of the node's backing's child nodes) is in place. */
+export function setShimChildNodesGetter(getter: unknown): void {
+  shimChildNodes = getter;
+}
+
+/** Per prototype: whether `childNodes` resolves to the shim's getter (computed once per prototype). */
+const shimAnswersChildNodes = new WeakMap<object, boolean>();
+
+function answeredByShim(prototype: object | null): boolean {
+  if (prototype === null || shimChildNodes === undefined) {
+    return false;
+  }
+  let answered = shimAnswersChildNodes.get(prototype);
+  if (answered === undefined) {
+    answered = false;
+    for (let current: object | null = prototype; current !== null; current = Object.getPrototypeOf(current)) {
+      const descriptor = Object.getOwnPropertyDescriptor(current, 'childNodes');
+      if (descriptor) {
+        answered = descriptor.get === shimChildNodes;
+        break;
+      }
+    }
+    shimAnswersChildNodes.set(prototype, answered);
+  }
+  return answered;
+}
+
+const hasOwn = (node: object, key: PropertyKey): boolean => Object.prototype.hasOwnProperty.call(node, key);
+
+/**
+ * Child nodes for the selector engine (read only: css-select and `findAll` / `findOne` never change the array).
+ * Where `childNodes` is the shim's getter and the node has a backing, the backing's array is used as it is (render
+ * speed: the getter copies it and decorates the copy as a NodeList on every read, ~40k times per full-catalog
+ * render); otherwise `childNodes` is read (a new array every time, not copied again).
+ */
 const childrenOf = (node: AnyNode): AnyNode[] => {
+  if (node !== null && typeof node === 'object') {
+    const backing = (node as {[BACKING]?: StructureBacking})[BACKING];
+    if (backing !== undefined && !hasOwn(node, 'childNodes') && answeredByShim(Object.getPrototypeOf(node))) {
+      return backing.childNodes() as AnyNode[];
+    }
+  }
   const list = node?.childNodes;
-  return list ? Array.from(list as ArrayLike<AnyNode>) : [];
+  return list ? (Array.isArray(list) ? list : Array.from(list as ArrayLike<AnyNode>)) : [];
 };
 
 const isTag = (node: AnyNode): boolean => node != null && node.nodeType === ELEMENT_NODE;
@@ -125,7 +170,47 @@ function options(context?: AnyNode): Options<AnyNode, AnyNode> {
     relativeSelector: false,
     context: context === undefined ? undefined : [context],
     pseudos: serverPseudos,
+    // No result caches inside compiled selectors: compiled selectors are cached process-wide (below), and
+    // css-select's default `cacheResults: true` keeps a `WeakSet` of ancestors that did not match inside every
+    // descendant combinator (and a `WeakMap` per `:has` / `:contains`). Those entries outlive the query, so a later
+    // query would miss an ancestor whose attributes changed in between (`.on span` after `p.setAttribute('class',
+    // 'on')`): components query and mutate the tree during a pass.
+    cacheResults: false,
   };
+}
+
+/**
+ * Compiled selectors (render speed: css-select parses and compiles a selector string on every call, ~25k queries
+ * with a few hundred distinct selectors per full-catalog render). A compiled selector depends on the queried node
+ * only through `:scope` (css-select passes the context to the `scope` pseudo-class alone, and relative selectors are
+ * disabled), so selectors that mention `scope` are compiled per call as before. Selectors that do not compile are not
+ * cached: they throw again, and are reported, on every call. Bounded: cleared when full. A compiled selector holds no
+ * state about the nodes it saw (`cacheResults: false` in `options()`), so a cached one sees the current tree.
+ */
+type CompiledQuery<N> = ReturnType<typeof _compileUnsafe<N, N>>;
+const MAX_COMPILED = 2048;
+const compiledQueries = new Map<string, CompiledQuery<AnyNode>>();
+const compiledMatchers = new Map<string, CompiledQuery<AnyNode>>();
+/** The options of every compiled selector (`options()` without a context). */
+const compileOptions = options();
+
+function compiled(
+  cache: Map<string, CompiledQuery<AnyNode>>,
+  selector: string,
+  compileSelector: (selector: string, options: Options<AnyNode, AnyNode>) => CompiledQuery<AnyNode>
+): CompiledQuery<AnyNode> | string {
+  if (/scope/i.test(selector)) {
+    return selector;
+  }
+  let query = cache.get(selector);
+  if (query === undefined) {
+    query = compileSelector(selector, compileOptions);
+    if (cache.size >= MAX_COMPILED) {
+      cache.clear();
+    }
+    cache.set(selector, query);
+  }
+  return query;
 }
 
 export type SelectorErrorHandler = (selector: string, error: unknown) => void;
@@ -148,7 +233,7 @@ function reportSelectorError(selector: string, error: unknown): void {
 /** All descendants of `root` (not `root` itself) matching `selector`, in tree order. */
 export function queryAll(root: AnyNode, selector: string): AnyNode[] {
   try {
-    return selectAll(String(selector), root, options(root));
+    return selectAll(compiled(compiledQueries, String(selector), _compileUnsafe), root, options(root));
   } catch (error) {
     reportSelectorError(selector, error);
     return [];
@@ -158,7 +243,7 @@ export function queryAll(root: AnyNode, selector: string): AnyNode[] {
 /** First descendant of `root` (not `root` itself) matching `selector`. */
 export function queryOne(root: AnyNode, selector: string): AnyNode | null {
   try {
-    return selectOne(String(selector), root, options(root));
+    return selectOne(compiled(compiledQueries, String(selector), _compileUnsafe), root, options(root));
   } catch (error) {
     reportSelectorError(selector, error);
     return null;
@@ -168,7 +253,7 @@ export function queryOne(root: AnyNode, selector: string): AnyNode | null {
 /** `Element.prototype.matches` semantics. */
 export function matches(element: AnyNode, selector: string): boolean {
   try {
-    return is(element, String(selector), options(element));
+    return is(element, compiled(compiledMatchers, String(selector), compile), options(element));
   } catch (error) {
     reportSelectorError(selector, error);
     return false;

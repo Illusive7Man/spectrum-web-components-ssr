@@ -29,13 +29,15 @@ export const COMMENT_NODE = 8;
 export const DOCUMENT_NODE = 9;
 export const DOCUMENT_FRAGMENT_NODE = 11;
 
+/** `NodeList.item()` of the arrays returned by `nodeList` (one shared function, no closure per list). */
+function itemOfList(this: unknown[], index: number): unknown {
+  return this[index] ?? null;
+}
+const ITEM_PROPERTY: PropertyDescriptor = {value: itemOfList, enumerable: false, configurable: true};
+
 /** Arrays double as NodeList / HTMLCollection (index access, `length`, iteration, `forEach`, `item()`). */
 export function nodeList<T>(items: T[]): T[] & {item(index: number): T | null} {
-  Object.defineProperty(items, 'item', {
-    value: (index: number) => items[index] ?? null,
-    enumerable: false,
-    configurable: true,
-  });
+  Object.defineProperty(items, 'item', ITEM_PROPERTY);
   return items as T[] & {item(index: number): T | null};
 }
 
@@ -107,10 +109,11 @@ export class DetachedBacking implements StructureBacking {
 export class ServerText extends ShimNode {
   data: string;
 
-  constructor(data: unknown = '') {
+  /** `backing`: the structure backing (default: a detached text node). */
+  constructor(data: unknown = '', backing?: StructureBacking) {
     super();
     this.data = String(data);
-    setBacking(this, new DetachedBacking(this));
+    setBacking(this, backing ?? new DetachedBacking(this));
   }
 
   get nodeType(): number {
@@ -211,19 +214,33 @@ export class ServerFragment extends ShimNode {
 
 const templateContents = new WeakMap<object, ServerFragment>();
 
+/**
+ * The structure backing `createPlainElement` gives the element it constructs (the server renderer's tree facades),
+ * taken by the `ServerElement` / `ServerSlotElement` constructor instead of creating a detached backing that would be
+ * replaced right away.
+ */
+let presetBacking: StructureBacking | undefined;
+
+function takePresetBacking(): StructureBacking | undefined {
+  const backing = presetBacking;
+  presetBacking = undefined;
+  return backing;
+}
+
 /** A detached HTML element (anything `document.createElement` returns for a non-custom tag). */
 export class ServerElement extends ShimHTMLElement {
   declare __swcLocalName: string;
 
   constructor(localName = 'div', attributes?: Iterable<[string, string]>) {
     super();
+    const backing = takePresetBacking();
     Object.defineProperty(this, '__swcLocalName', {value: String(localName).toLowerCase(), enumerable: false});
     if (attributes) {
       for (const [name, value] of attributes) {
         this.setAttribute(name, value);
       }
     }
-    setBacking(this, new DetachedBacking(this));
+    setBacking(this, backing ?? new DetachedBacking(this));
   }
 
   get localName(): string {
@@ -247,7 +264,7 @@ export class ServerElement extends ShimHTMLElement {
 export class ServerSlotElement extends ShimHTMLSlotElement {
   constructor() {
     super();
-    setBacking(this, new DetachedBacking(this));
+    setBacking(this, takePresetBacking() ?? new DetachedBacking(this));
   }
 
   get name(): string {
@@ -266,14 +283,24 @@ export function registerElementClass(tag: string, ctor: new (localName: string) 
   elementClasses.set(tag, ctor);
 }
 
-/** Creates an inert detached element for `tag` (never constructs custom elements). */
-export function createPlainElement(tag: string): AnyNode {
+/**
+ * Creates an inert element for `tag` (never constructs custom elements): detached, or with `backing` as its structure
+ * backing (the server renderer's tree facades).
+ */
+export function createPlainElement(tag: string, backing?: StructureBacking): AnyNode {
   const localName = String(tag).toLowerCase();
-  if (localName === 'slot') {
-    return new ServerSlotElement();
+  presetBacking = backing;
+  try {
+    const ctor = elementClasses.get(localName) ?? ServerElement;
+    const element = localName === 'slot' ? new ServerSlotElement() : new ctor(localName);
+    if (backing !== undefined && presetBacking === backing) {
+      // Not taken by the constructor (a registered class that does not extend ServerElement).
+      setBacking(element, backing);
+    }
+    return element;
+  } finally {
+    presetBacking = undefined;
   }
-  const ctor = elementClasses.get(localName) ?? ServerElement;
-  return new ctor(localName);
 }
 
 /** Creates a detached element for `tag`; registered custom elements are constructed like a browser would. */

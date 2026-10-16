@@ -1,9 +1,12 @@
 // The SSR shim must be installed before anything touches a Spectrum module, so this import has to stay first.
 import './ssr-setup.js';
 import {existsSync} from 'node:fs';
+import {stat} from 'node:fs/promises';
+import type {ServerResponse} from 'node:http';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {gzipSync} from 'node:zlib';
+import {constants as zlibConstants, gzipSync} from 'node:zlib';
+import compression from 'compression';
 import express from 'express';
 import type {NextFunction, Request, RequestHandler, Response} from 'express';
 import {renderSpectrum} from 'swc-ssr/server';
@@ -11,9 +14,13 @@ import type {RenderReport, StyleOptions} from 'swc-ssr/server';
 import {catalog, findEntry} from './catalog/index.js';
 import type {CatalogEntry} from './catalog/types.js';
 import {layoutCss, pageTemplate} from './page.js';
+import {headFor, parseDedupe, STYLE_SHEET_PATH, styleSheetRoutes, type Coding} from './styles-routes.js';
 
 const demoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const distDir = path.join(demoRoot, 'public', 'dist');
+/** The client build (demo/build.mjs); SWC_SSR_DEMO_DIST points both at another directory. */
+const distDir = process.env.SWC_SSR_DEMO_DIST
+  ? path.resolve(process.env.SWC_SSR_DEMO_DIST)
+  : path.join(demoRoot, 'public', 'dist');
 const port = Number(process.env.PORT) || 3000;
 
 /* -------------------------------------------------------------------------------------------------------------- *
@@ -34,16 +41,22 @@ interface ShellOptions {
   body: string;
   /** Include the client bundle. */
   script: boolean;
+  /**
+   * Markup for `<head>` (after the favicon, before the layout CSS): with `?dedupe=link` the render's stylesheet hints
+   * (`RenderSpectrumResult.head`, see `headFor`), '' otherwise.
+   */
+  head?: string;
 }
 
 /** `#app` has no whitespace around its content on purpose: SSR and CSR then produce the same child nodes. */
-function shell({title, mode, lang, components, body, script}: ShellOptions): string {
+function shell({title, mode, lang, components, body, script, head}: ShellOptions): string {
   return (
     '<!doctype html>' +
     `<html lang="${escapeHtml(lang)}"><head><meta charset="utf-8">` +
     '<meta name="viewport" content="width=device-width, initial-scale=1">' +
     `<title>${escapeHtml(title)}</title>` +
     '<link rel="icon" href="data:,">' +
+    (head ?? '') +
     `<style>${layoutCss}</style></head><body>` +
     `<div id="app" data-mode="${mode}" data-components="${escapeHtml(components.join(','))}">${body}</div>` +
     (script ? '<script type="module" src="/dist/client.js"></script>' : '') +
@@ -117,7 +130,12 @@ type ServedReport = RenderReport & {loadErrors: LoadFailure[]};
  * ?styles= / ?refs=
  * -------------------------------------------------------------------------------------------------------------- */
 
-/** `?styles=`: 'full' (default) is today's output, 'trimmed' the trimmed CSS, 'minified' trimmed + short custom property names. */
+/**
+ * `?styles=`: 'full' (default) is today's output, 'trimmed' the trimmed CSS, 'minified' trimmed + short custom property names.
+ * `?dedupe=link` (any mode) links every distinct stylesheet text (`/swc-css/<hash>.css`, demo/src/styles-routes.ts)
+ * instead of repeating it in every shadow root; `?dedupe=none` / absent is the default. Other values are a 400 (which
+ * tests/styles-dedupe.spec.ts uses to detect a server that supports the parameter).
+ */
 type StylesMode = 'full' | 'trimmed' | 'minified';
 const STYLES_MODES: readonly StylesMode[] = ['full', 'trimmed', 'minified'];
 
@@ -157,6 +175,9 @@ function parseStyles(req: Request): StylesRequest {
   const options: StyleOptions = {mode: mode === 'full' ? 'full' : 'trimmed'};
   if (mode === 'minified') options.minifyCustomProperties = true;
   if (references.length > 0) options.references = references;
+  const dedupe = parseDedupe(req.query.dedupe);
+  if (dedupe === undefined) throw new BadRequestError('?dedupe must be one of none, link');
+  if (dedupe === 'link') options.dedupe = 'link';
   return {mode: mode as StylesMode, options};
 }
 
@@ -190,6 +211,8 @@ function exclusive<T>(task: () => Promise<T>): Promise<T> {
 
 interface SsrPage {
   html: string;
+  /** `RenderSpectrumResult.head`: the stylesheet preload hints with `?dedupe=link`, '' otherwise. */
+  head: string;
   /** The entries that are on the page (entries whose load() failed are left out when `tolerateLoadErrors`). */
   entries: CatalogEntry[];
   report: ServedReport;
@@ -233,7 +256,7 @@ function renderSsr(
       lastReport = report;
       reportsByKey.set(reportKey, report);
     }
-    return {html: result.html, entries: loaded, report, renderMs: performance.now() - started};
+    return {html: result.html, head: result.head, entries: loaded, report, renderMs: performance.now() - started};
   });
 }
 
@@ -252,7 +275,8 @@ app.disable('x-powered-by');
  *
  * HEAD on `/dist/*` (the client bundle) is left to `express.static`, which answers it like the GET without the body:
  * with the file's `Content-Type` / `Content-Length` (404 for a missing file). Review finding (fixed): those requests
- * used to get the empty health-check answer, without a `Content-Type`.
+ * used to get the empty health-check answer, without a `Content-Type`. HEAD on `/swc-css/*` (`?dedupe=link`
+ * stylesheets) is likewise answered by its route.
  */
 const HEAD_LOG_INTERVAL_MS = 60_000;
 let headRequests = 0;
@@ -266,7 +290,7 @@ const headLog = setInterval(() => {
 headLog.unref();
 
 app.use((req: Request, res: Response, next: NextFunction) => {
-  if (req.method !== 'HEAD' || req.path.startsWith('/dist/')) {
+  if (req.method !== 'HEAD' || req.path.startsWith('/dist/') || req.path.startsWith(STYLE_SHEET_PATH)) {
     next();
     return;
   }
@@ -279,11 +303,11 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   }
 });
 
-/** One line per request (static bundle files excluded); SSR routes add their render duration. */
+/** One line per request (static bundle files and linked stylesheets excluded); SSR routes add their render duration. */
 app.use((req: Request, res: Response, next: NextFunction) => {
   const started = performance.now();
   res.on('finish', () => {
-    if (req.path.startsWith('/dist/')) return;
+    if (req.path.startsWith('/dist/') || (req.path.startsWith(STYLE_SHEET_PATH) && res.statusCode === 200)) return;
     const render = typeof res.locals.renderLog === 'string' ? ` | ${res.locals.renderLog}` : '';
     console.log(
       `[demo] ${req.method} ${req.originalUrl} -> ${res.statusCode} in ${(performance.now() - started).toFixed(1)} ms${render}`,
@@ -292,7 +316,124 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-app.use('/dist', express.static(distDir, {index: false}));
+/* -------------------------------------------------------------------------------------------------------------- *
+ * Compression
+ * -------------------------------------------------------------------------------------------------------------- */
+
+/**
+ * Responses are compressed the way a production server would, because the size of the markup is the point of the
+ * exercise: a page repeats the same stylesheet in every shadow root of a class, which brotli's 4 MB window (quality 4,
+ * about 20 ms for a 1.2 MB page) squeezes to a few percent while gzip's 32 KB window cannot (measured: a button page of
+ * 1,252 KB is 43 KB with brotli, 120 KB with gzip).
+ *
+ *   dynamic    HTML, JSON and other compressible responses: `compression` negotiates `Accept-Encoding` and prefers brotli
+ *              over gzip (unless the client's q-values say otherwise); responses below 1 KB are sent as they are.
+ *              The middleware adds `Vary: Accept-Encoding` to every response it considers, compressed or not.
+ *   /dist      the build (demo/build.mjs) wrote `<file>.br` and `<file>.gz` next to every script of 1 KB or more;
+ *              `precompressed()` serves them (`Content-Encoding`, the original file's `Content-Type`) without compressing
+ *              anything per request. Files without a sibling (source maps) fall through to the dynamic path.
+ *   /swc-css   the `?dedupe=link` stylesheets (demo/src/styles-routes.ts) are mounted before the middleware: a text
+ *              never changes under its hash, so the route compresses each one once and sets `Content-Encoding`,
+ *              `Content-Length`, `ETag` and `Vary` itself, the same for GET, HEAD and 304 (review finding: behind the
+ *              middleware a HEAD reported the identity length without `Content-Encoding`, and a 304 had no `Vary`).
+ *              Unknown hashes are a 404 `no-store`; /dist requests never reach it.
+ */
+app.use(styleSheetRoutes(acceptedCodings));
+
+app.use(
+  compression({
+    threshold: 1024,
+    brotli: {params: {[zlibConstants.BROTLI_PARAM_QUALITY]: 4, [zlibConstants.BROTLI_PARAM_MODE]: zlibConstants.BROTLI_MODE_TEXT}},
+  }),
+);
+
+const CODING_SUFFIX: Record<Coding, string> = {br: '.br', gzip: '.gz'};
+/** Server preference when the client rates both the same. */
+const CODING_ORDER: readonly Coding[] = ['br', 'gzip'];
+
+/** The codings (br, gzip) an `Accept-Encoding` header allows, best first: by its q-values, then `CODING_ORDER`. */
+function acceptedCodings(header: string | undefined): Coding[] {
+  if (!header) return [];
+  const quality = new Map<string, number>();
+  for (const part of header.split(',')) {
+    const [name = '', ...params] = part.trim().toLowerCase().split(';');
+    const q = params.map((param) => /^\s*q\s*=\s*([0-9.]+)\s*$/.exec(param)?.[1]).find((value) => value !== undefined);
+    quality.set(name.trim(), q === undefined ? 1 : Number(q));
+  }
+  const rated = CODING_ORDER.map((coding, index) => ({
+    coding,
+    index,
+    q: quality.get(coding) ?? (coding === 'gzip' ? quality.get('x-gzip') : undefined) ?? quality.get('*') ?? 0,
+  }));
+  return rated
+    .filter(({q}) => q > 0)
+    .sort((a, b) => b.q - a.q || a.index - b.index)
+    .map(({coding}) => coding);
+}
+
+async function isFile(file: string): Promise<boolean> {
+  try {
+    return (await stat(file)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** Which precompressed sibling `precompressed()` picked for a response (read by the static handler's `setHeaders`). */
+const servedAs = new WeakMap<ServerResponse, {coding: Coding; suffix: string}>();
+
+/**
+ * Serves `<file>.br` / `<file>.gz` in place of `<file>` for clients that accept them: the request is handed on to the
+ * static handler with the sibling's name (so ETag, Last-Modified, conditional requests, ranges and HEAD all work on the
+ * file that is sent), and `setHeaders` below adds `Content-Encoding` and the original file's `Content-Type`.
+ */
+function precompressed(root: string): RequestHandler {
+  const prefix = root.endsWith(path.sep) ? root : root + path.sep;
+  return async (req, res, next) => {
+    try {
+      const codings = req.method === 'GET' || req.method === 'HEAD' ? acceptedCodings(req.get('accept-encoding')) : [];
+      if (codings.length > 0 && !req.path.endsWith('/')) {
+        const file = path.join(root, decodeURIComponent(req.path));
+        if (file.startsWith(prefix)) {
+          for (const coding of codings) {
+            const suffix = CODING_SUFFIX[coding];
+            if (!(await isFile(file + suffix))) continue;
+            servedAs.set(res, {coding, suffix});
+            const query = req.url.indexOf('?');
+            req.url = query < 0 ? req.url + suffix : req.url.slice(0, query) + suffix + req.url.slice(query);
+            break;
+          }
+        }
+      }
+    } catch {
+      // A malformed path: the static handler answers it.
+    }
+    next();
+  };
+}
+
+/**
+ * The build's files: chunks carry their content hash in the name and never change (`immutable`, a year); the entry
+ * (`client.js`, its map) keeps its URL and is revalidated with its ETag on every load (`no-cache`: a conditional request
+ * that is answered with 304 when nothing changed).
+ */
+function distHeaders(res: ServerResponse, file: string): void {
+  const encoded = servedAs.get(res);
+  const original = encoded ? file.slice(0, -encoded.suffix.length) : file;
+  if (encoded) {
+    res.setHeader('Content-Encoding', encoded.coding);
+    // Without this the type would be the .br / .gz one; `send` leaves a Content-Type that is already set alone. The
+    // same lookup `send` does for the plain file, so both variants carry the identical header.
+    const {mime} = express.static;
+    const type = mime.lookup(original, mime.default_type);
+    const charset = mime.charsets.lookup(type, '');
+    res.setHeader('Content-Type', type + (charset ? `; charset=${charset}` : ''));
+  }
+  const relative = path.relative(distDir, original).split(path.sep);
+  res.setHeader('Cache-Control', relative[0] === 'chunks' ? 'public, max-age=31536000, immutable' : 'no-cache');
+}
+
+app.use('/dist', precompressed(distDir), express.static(distDir, {index: false, setHeaders: distHeaders}));
 
 const route =
   (handler: (req: Request, res: Response) => Promise<void>): RequestHandler =>
@@ -327,6 +468,9 @@ async function serveSsr(
     `${page.report.elements.length} elements, ${elementErrors} errors, ${fallbacks} fallbacks` +
     `, lang ${lang}` +
     `, styles ${styles.mode} ${stylesReport ? `${kb(stylesReport.trimmedBytes)}/${kb(stylesReport.fullBytes)} KB` : 'n/a'}` +
+    (stylesReport?.dedupe
+      ? `, linked ${stylesReport.dedupe.sheets.length} sheets ${kb(stylesReport.dedupe.linkedBytes)} KB (${stylesReport.dedupe.links} links)`
+      : '') +
     (page.report.loadErrors.length > 0 ? `, ${page.report.loadErrors.length} entries skipped` : '');
   res.set('Server-Timing', `ssr;dur=${page.renderMs.toFixed(1)}`);
   sendHtml(
@@ -338,6 +482,7 @@ async function serveSsr(
       components: page.entries.map((entry) => entry.name),
       body: page.html,
       script: req.query.nohydrate !== '1',
+      head: headFor(page, req.query.hints),
     }),
   );
 }
@@ -406,8 +551,12 @@ app.get('/report.json', (req, res) => {
  *   fullBytes / trimmedBytes / sheets  from `report.styles` (what the trimmer says; both are the measured CSS size
  *                                      when the server core reports no styles),
  *   cssBytes                           measured: the text of every <style> element of the document,
- *   htmlBytes / gzipBytes              the whole document as served, raw and gzipped,
- *   reported                           whether `report.styles` was present.
+ *   htmlBytes / gzipBytes              the whole document as served, raw and gzipped (gzip of the uncompressed
+ *                                      document, unrelated to the response's own Content-Encoding),
+ *   reported                           whether `report.styles` was present,
+ *   dedupe                             with `?dedupe=link`: `report.styles.dedupe` (the linked texts: hash, url, bytes,
+ *                                      links; `linkedBytes`, `inlineBytes`), else null; `sheets[].hash` names the
+ *                                      linked text of a sheet. `cssBytes` then counts only the CSS left inline.
  */
 app.get(
   '/styles.json',
@@ -425,6 +574,7 @@ app.get(
       components: page.entries.map((loaded) => loaded.name),
       body: page.html,
       script: true,
+      head: headFor(page, req.query.hints),
     });
     let cssBytes = 0;
     for (const match of document.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/g)) cssBytes += Buffer.byteLength(match[1] ?? '');
@@ -440,6 +590,7 @@ app.get(
       htmlBytes: Buffer.byteLength(document),
       gzipBytes: gzipSync(document).length,
       sheets: reported?.sheets ?? [],
+      dedupe: reported?.dedupe ?? null,
       durationMs: reported?.durationMs ?? null,
       elements: page.report.elements.length,
     });

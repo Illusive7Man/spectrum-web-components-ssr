@@ -19,7 +19,7 @@ import {
   setConstructionHook,
   type StructureBacking,
 } from '../dom-shim/hooks.js';
-import {ServerSlotElement, ServerText, createPlainElement} from '../dom-shim/nodes.js';
+import {ServerText, createPlainElement} from '../dom-shim/nodes.js';
 import {constructElement} from './construct.js';
 import {errorMessage, withElementScope, type ElementRecord, type RenderContext} from './context.js';
 import type {ElementReport, LifecycleMode} from './types.js';
@@ -55,6 +55,68 @@ export function emptyBacking(): StructureBacking {
 
 const hasOwnBacking = (node: object) => Object.prototype.hasOwnProperty.call(node, BACKING);
 
+/*
+ * Structure backings of tree nodes. One object per node with shared prototype methods: the realm used to give every
+ * facade a backing of four or five fresh closures (render speed: ~40k facades per full-catalog render).
+ */
+
+/** Backing of a tree node (element or text) of a realm. */
+class NodeBacking implements StructureBacking {
+  constructor(
+    readonly realm: TreeRealm,
+    readonly node: TreeNode
+  ) {}
+
+  childNodes(): Facade[] {
+    return this.realm.childrenOf(this.node);
+  }
+
+  parentNode(): Facade | null {
+    return this.realm.parentOf(this.node);
+  }
+
+  isConnected(): boolean {
+    return true;
+  }
+
+  assignedSlot(): Facade | null {
+    return this.realm.assignedSlotOf(this.node);
+  }
+}
+
+/** Backing of a plain `<slot>` (not a custom element): also answers `assignedNodes`. */
+class SlotBacking extends NodeBacking {
+  assignedNodes(flatten: boolean): Facade[] {
+    return this.realm.assignedNodes(this.node as TreeElementNode, flatten);
+  }
+}
+
+/** Backing of a shadow root's content (no parent). */
+class ShadowBacking implements StructureBacking {
+  constructor(
+    readonly realm: TreeRealm,
+    readonly shadow: TreeDocumentNode
+  ) {}
+
+  childNodes(): Facade[] {
+    return this.realm.childrenOf(this.shadow);
+  }
+
+  parentNode(): null {
+    return null;
+  }
+
+  isConnected(): boolean {
+    return true;
+  }
+}
+
+/** The realm and tree node of a plain element facade: its structure backing (set once, when it is created). */
+function facadeLink(facade: object): NodeBacking | undefined {
+  const backing = (facade as {[BACKING]?: unknown})[BACKING];
+  return backing instanceof NodeBacking ? backing : undefined;
+}
+
 /**
  * Event-path links of plain element facades (`__host` / `__eventTargetParent`, read by the shim's EventTarget),
  * computed lazily from the tree.
@@ -64,12 +126,11 @@ const hasOwnBacking = (node: object) => Object.prototype.hasOwnProperty.call(nod
  * descriptor array is shared with the long-lived maps of the same element class (it was reachable from
  * `document.documentElement`'s map). The first facade of the process therefore pinned its realm - and with it a
  * whole render - forever. All facades now share the same two accessor functions, which find their realm and tree
- * node in a WeakMap.
+ * node through the facade's own structure backing (render speed: no WeakMap entry per facade either).
  */
-const eventLinks = new WeakMap<object, {realm: TreeRealm; node: TreeNode}>();
 const HOST_LINK: PropertyDescriptor = {
   get(this: object) {
-    const link = eventLinks.get(this);
+    const link = facadeLink(this);
     return link ? link.realm.hostInstanceOf(link.node) : undefined;
   },
   set() {},
@@ -77,11 +138,39 @@ const HOST_LINK: PropertyDescriptor = {
 };
 const EVENT_PARENT_LINK: PropertyDescriptor = {
   get(this: object) {
-    const link = eventLinks.get(this);
+    const link = facadeLink(this);
     return link ? link.realm.eventParentOf(link.node) : undefined;
   },
   set() {},
   configurable: true,
+};
+
+/**
+ * `setAttribute` / `removeAttribute` of plain element facades: the change is applied (the method of the facade's
+ * class) and recorded for the pass output (see light-mutations.ts). Shared functions instead of per-facade closures.
+ */
+const RECORDING_SET_ATTRIBUTE: PropertyDescriptor = {
+  value(this: Facade, name: string, value: unknown) {
+    Object.getPrototypeOf(this).setAttribute.call(this, name, value);
+    const link = facadeLink(this);
+    if (link) {
+      link.realm.recordLightMutation(link.node as TreeElementNode, name, String(value));
+    }
+  },
+  configurable: true,
+  writable: true,
+};
+const RECORDING_REMOVE_ATTRIBUTE: PropertyDescriptor = {
+  value(this: Facade, name: string) {
+    const had = this.hasAttribute(name);
+    Object.getPrototypeOf(this).removeAttribute.call(this, name);
+    const link = facadeLink(this);
+    if (had && link) {
+      link.realm.recordLightMutation(link.node as TreeElementNode, name, null);
+    }
+  },
+  configurable: true,
+  writable: true,
 };
 
 /**
@@ -116,10 +205,32 @@ export function attachShadowRoot(element: Facade, backing: StructureBacking): Fa
 
 /** `backing` whose child nodes are hidden until `element` has rendered in this pass (see `attachShadowRoot`). */
 function committedContentOnly(element: Facade, backing: StructureBacking): StructureBacking {
-  return {
-    ...backing,
-    childNodes: () => (hasCommittedRender(element) ? backing.childNodes() : []),
-  };
+  return backing instanceof ShadowBacking
+    ? new CommittedShadowBacking(element, backing)
+    : {
+        ...backing,
+        childNodes: () => (hasCommittedRender(element) ? backing.childNodes() : []),
+      };
+}
+
+/** A `ShadowBacking` whose child nodes are hidden until `element` has rendered (see `committedContentOnly`). */
+class CommittedShadowBacking implements StructureBacking {
+  constructor(
+    private readonly element: Facade,
+    private readonly backing: ShadowBacking
+  ) {}
+
+  childNodes(): Facade[] {
+    return hasCommittedRender(this.element) ? this.backing.childNodes() : [];
+  }
+
+  parentNode(): null {
+    return null;
+  }
+
+  isConnected(): boolean {
+    return true;
+  }
 }
 
 export class TreeRealm {
@@ -128,6 +239,7 @@ export class TreeRealm {
   private readonly childCache = new Map<TreeNode, Facade[]>();
   private readonly slotIndexes = new Map<TreeDocumentNode, Map<string, TreeElementNode>>();
   private readonly instances = new Map<TreeElementNode, HTMLElement>();
+  /** Tree nodes of the instances (plain facades and text nodes find theirs through their backing, `nodeOf`). */
   private readonly nodesByFacade = new WeakMap<object, TreeNode>();
   private readonly constructing = new Set<TreeElementNode>();
   private readonly failed = new Set<TreeElementNode>();
@@ -167,10 +279,8 @@ export class TreeRealm {
       return cached;
     }
     if (isTextNode(node)) {
-      const text = new ServerText(node.data);
-      setBacking(text, this.backingFor(node));
+      const text = new ServerText(node.data, this.backingFor(node));
       this.facades.set(node, text);
-      this.nodesByFacade.set(text, node);
       return text;
     }
     if (!isElementNode(node)) {
@@ -182,18 +292,19 @@ export class TreeRealm {
         return instance;
       }
     }
-    const wrapper: Facade = node.name === 'slot' ? new ServerSlotElement() : createPlainElement(node.name);
-    for (const [name, value] of Object.entries(node.attribs)) {
+    // (`createPlainElement` gives `<slot>` a `ServerSlotElement`.)
+    const wrapper: Facade = createPlainElement(node.name, this.backingFor(node));
+    const attribs = node.attribs;
+    for (const name in attribs) {
       if (name !== MARKER_ATTRIBUTE) {
-        wrapper.setAttribute(name, value);
+        wrapper.setAttribute(name, attribs[name]);
       }
     }
     this.facades.set(node, wrapper);
-    this.nodesByFacade.set(wrapper, node);
-    setBacking(wrapper, this.backingFor(node));
-    this.recordMutations(wrapper, node);
-    // Event-path links used by the shim's EventTarget (computed lazily from the tree).
-    eventLinks.set(wrapper, {realm: this, node});
+    // Attribute changes are recorded (applied to the pass output later) and the event-path links used by the
+    // shim's EventTarget are computed lazily from the tree, both through the facade's backing (`facadeLink`).
+    Object.defineProperty(wrapper, 'setAttribute', RECORDING_SET_ATTRIBUTE);
+    Object.defineProperty(wrapper, 'removeAttribute', RECORDING_REMOVE_ATTRIBUTE);
     Object.defineProperty(wrapper, '__host', HOST_LINK);
     Object.defineProperty(wrapper, '__eventTargetParent', EVENT_PARENT_LINK);
     const shadow = this.tree.shadowOf(node);
@@ -203,41 +314,23 @@ export class TreeRealm {
     return wrapper;
   }
 
-  /** Records attribute changes on a plain element facade (applied to the pass output later). */
-  private recordMutations(wrapper: Facade, node: TreeElementNode): void {
-    const record = (name: string, value: string | null): void => {
-      let changes = this.lightMutations.get(node);
-      if (!changes) {
-        changes = new Map();
-        this.lightMutations.set(node, changes);
-      }
-      changes.set(String(name).toLowerCase(), value);
-    };
-    const setAttribute = wrapper.setAttribute;
-    const removeAttribute = wrapper.removeAttribute;
-    Object.defineProperty(wrapper, 'setAttribute', {
-      value(this: Facade, name: string, value: unknown) {
-        setAttribute.call(this, name, value);
-        record(name, String(value));
-      },
-      configurable: true,
-      writable: true,
-    });
-    Object.defineProperty(wrapper, 'removeAttribute', {
-      value(this: Facade, name: string) {
-        const had = this.hasAttribute(name);
-        removeAttribute.call(this, name);
-        if (had) {
-          record(name, null);
-        }
-      },
-      configurable: true,
-      writable: true,
-    });
+  /** Records an attribute change made on a plain element facade (applied to the pass output later). */
+  recordLightMutation(node: TreeElementNode, name: string, value: string | null): void {
+    let changes = this.lightMutations.get(node);
+    if (!changes) {
+      changes = new Map();
+      this.lightMutations.set(node, changes);
+    }
+    changes.set(String(name).toLowerCase(), value);
   }
 
   nodeOf(facade: object): TreeNode | undefined {
-    return this.nodesByFacade.get(facade);
+    const node = this.nodesByFacade.get(facade);
+    if (node !== undefined) {
+      return node;
+    }
+    const link = facadeLink(facade);
+    return link && link.realm === this && this.facades.get(link.node) === facade ? link.node : undefined;
   }
 
   backingFor(node: TreeNode): StructureBacking {
@@ -246,13 +339,7 @@ export class TreeRealm {
       return backing;
     }
     const isSlot = isElementNode(node) && node.name === 'slot' && this.tree.idOf(node) === undefined;
-    backing = {
-      childNodes: () => this.childrenOf(node),
-      parentNode: () => this.parentOf(node),
-      isConnected: () => true,
-      assignedSlot: () => this.assignedSlotOf(node),
-      ...(isSlot ? {assignedNodes: (flatten: boolean) => this.assignedNodes(node as TreeElementNode, flatten)} : {}),
-    };
+    backing = isSlot ? new SlotBacking(this, node) : new NodeBacking(this, node);
     this.backings.set(node, backing);
     return backing;
   }
@@ -260,28 +347,35 @@ export class TreeRealm {
   shadowBackingFor(shadow: TreeDocumentNode): StructureBacking {
     let backing = this.backings.get(shadow);
     if (!backing) {
-      backing = {
-        childNodes: () => this.childrenOf(shadow),
-        parentNode: () => null,
-        isConnected: () => true,
-      };
+      backing = new ShadowBacking(this, shadow);
       this.backings.set(shadow, backing);
     }
     return backing;
   }
 
-  private childrenOf(node: TreeNode): Facade[] {
+  /** Facades of the child nodes (elements and text) of a tree element or shadow root (internal: backings). */
+  childrenOf(node: TreeNode): Facade[] {
     let children = this.childCache.get(node);
     if (!children) {
-      children = isElementNode(node) || isDocumentNode(node)
-        ? childNodes(node).map((child) => this.facadeOf(child)).filter((child) => child !== null)
-        : [];
+      children = [];
+      if (isElementNode(node) || isDocumentNode(node)) {
+        // (`childNodes(node)` without the intermediate arrays.)
+        for (const child of node.children) {
+          if (isElementNode(child) || isTextNode(child)) {
+            const facade = this.facadeOf(child);
+            if (facade !== null) {
+              children.push(facade);
+            }
+          }
+        }
+      }
       this.childCache.set(node, children);
     }
     return children;
   }
 
-  private parentOf(node: TreeNode): Facade | null {
+  /** Internal (backings). */
+  parentOf(node: TreeNode): Facade | null {
     const parent = node.parent;
     if (!parent) {
       return null;
@@ -402,7 +496,8 @@ export class TreeRealm {
     return index.get(name);
   }
 
-  private assignedSlotOf(node: TreeNode): Facade | null {
+  /** Internal (backings). */
+  assignedSlotOf(node: TreeNode): Facade | null {
     const parent = node.parent;
     if (!parent || !isElementNode(parent)) {
       return null;
@@ -415,7 +510,8 @@ export class TreeRealm {
     return slot ? this.facadeOf(slot) : null;
   }
 
-  private assignedNodes(slot: TreeElementNode, flatten: boolean): Facade[] {
+  /** Internal (backings). */
+  assignedNodes(slot: TreeElementNode, flatten: boolean): Facade[] {
     let root: TreeNode = slot;
     while (root.parent) {
       root = root.parent;

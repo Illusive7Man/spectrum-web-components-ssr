@@ -190,3 +190,60 @@ test('M9: elements without MatchMediaControllers are not touched by the adapter'
   assert.deepEqual(element.updates, [], 'no update requested');
   assert.equal(Object.getOwnPropertyDescriptor(element.other, 'matches')?.value, true, 'not pinned');
 });
+
+/**
+ * 0.3.0 review (the catalog's color-area handles stayed in the corner): `sp-color-area` / `sp-color-wheel` measure
+ * themselves from a ResizeObserver started in their own `connectedCallback()`, which runs at the upgrade while the
+ * element still carries `defer-hydration`. Measured before the hydrating update, the hydrating render differed from
+ * the server markup only in attribute values, which lit's `hydrate()` primes without writing: the DOM kept the
+ * server's `transform`. The measurement is hidden for the hydrating render and given back right after it, with one
+ * more update requested (which then writes the measured layout).
+ */
+function measuredElement(tag: string, shape: 'area' | 'wheel' | 'none') {
+  const element = new FakeLitElement(tag, marker()) as FakeLitElement & {boundingClientRect?: unknown; seen: unknown[]};
+  element.seen = [];
+  if (shape === 'area') (element as any).getContentBoundingRect = () => ({width: 192, height: 192});
+  if (shape === 'wheel') (element as any).cacheLayoutData = () => {};
+  const render = element.render.bind(element);
+  element.render = () => {
+    element.seen.push(element.boundingClientRect);
+    return render();
+  };
+  const firstUpdated = element.firstUpdated.bind(element);
+  element.firstUpdated = () => {
+    element.seen.push(`firstUpdated:${element.boundingClientRect === undefined ? 'none' : 'rect'}`);
+    firstUpdated();
+  };
+  return element;
+}
+
+test('measured layout: hidden for the hydrating render, given back afterwards with one more update', () => {
+  const rect = {width: 192, height: 192};
+  for (const [tag, shape] of [
+    ['sp-color-area', 'area'],
+    ['my-color-wheel', 'wheel'],
+  ] as const) {
+    const element = measuredElement(tag, shape);
+    element.boundingClientRect = rect; // the ResizeObserver measured it before hydration
+    hydrate(element);
+    assert.deepEqual(element.seen, [undefined, undefined, 'firstUpdated:rect'], `${tag}: unmeasured renders, rect back after`);
+    assert.equal(element.boundingClientRect, rect);
+    assert.deepEqual(element.updates, [[undefined, undefined]], `${tag}: one update requested`);
+  }
+});
+
+test('measured layout: not measured before hydration - nothing hidden, one more update still requested', () => {
+  const element = measuredElement('sp-color-area', 'area');
+  hydrate(element);
+  assert.deepEqual(element.seen, [undefined, undefined, 'firstUpdated:none']);
+  assert.deepEqual(element.updates, [[undefined, undefined]]);
+});
+
+test('measured layout: elements of another shape keep their boundingClientRect and get no update', () => {
+  const element = measuredElement('x-measures', 'none');
+  const rect = {width: 1, height: 1};
+  element.boundingClientRect = rect;
+  hydrate(element);
+  assert.deepEqual(element.seen, [rect, rect, 'firstUpdated:rect']);
+  assert.deepEqual(element.updates, []);
+});

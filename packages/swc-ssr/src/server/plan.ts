@@ -69,12 +69,33 @@ export function canonicalAttributes(attributes: ReadonlyMap<string, string> | un
 let pendingStatic: {tag: string; attributes: string} | undefined;
 
 /**
+ * `canonicalAttributes` per static-attribute map. Upstream builds one map per element of a template when it first
+ * prepares the template (`staticAttributes` in `@lit-labs/ssr/lib/render-value.js`) and hands the same map to every
+ * render and pass (render speed: it was canonicalized again for every element, pass and renderer asked). The size
+ * guards against a map that changed anyway.
+ */
+const canonicalByMap = new WeakMap<ReadonlyMap<string, string>, {size: number; canonical: string}>();
+
+function canonicalAttributesOf(attributes: ReadonlyMap<string, string> | undefined): string {
+  if (!attributes || attributes.size === 0) {
+    return '';
+  }
+  const cached = canonicalByMap.get(attributes);
+  if (cached !== undefined && cached.size === attributes.size) {
+    return cached.canonical;
+  }
+  const canonical = canonicalAttributes(attributes);
+  canonicalByMap.set(attributes, {size: attributes.size, canonical});
+  return canonical;
+}
+
+/**
  * Upstream gives the template's static attributes of a custom element only to `ElementRenderer.matchesClass(ctor,
  * tagName, attributes)`, right before it constructs the matching renderer (`getElementRenderer` in
  * `@lit-labs/ssr/lib/element-renderer.js`); the renderers stash them here for their constructor.
  */
 export function stashStaticAttributes(tag: string, attributes: ReadonlyMap<string, string> | undefined): void {
-  pendingStatic = {tag, attributes: canonicalAttributes(attributes)};
+  pendingStatic = {tag, attributes: canonicalAttributesOf(attributes)};
 }
 
 function takeStaticAttributes(tag: string): string {
@@ -357,18 +378,33 @@ export function verifyAdoptions(context: RenderContext, tree: ServerTree, willRe
   };
   const sourceOf = (record: ElementRecord): ElementRecord | undefined =>
     record.adoptedFrom === undefined ? undefined : previous.records.get(record.adoptedFrom);
+  /** How many of `records` have each light-DOM signature in `of`. */
+  const countSignatures = (records: ElementRecord[], of: ServerTree): Map<string, number> => {
+    const counts = new Map<string, number>();
+    for (const record of records) {
+      const light = signature(record, of);
+      if (light !== undefined) {
+        counts.set(light, (counts.get(light) ?? 0) + 1);
+      }
+    }
+    return counts;
+  };
   let rejected = 0;
   for (const group of ambiguousGroups(context)) {
+    // Counted once per group (render speed: comparing every member with every other one was quadratic in large
+    // groups, e.g. hundreds of same-tag siblings in one scope).
+    let currentCounts: Map<string, number> | undefined;
+    let previousCounts: Map<string, number> | undefined;
     /** Whether the light DOM alone identifies `record` as `source` (no other member of the group has it). */
     const identifiedByLight = (record: ElementRecord, source: ElementRecord): boolean => {
       if (sameLight(record, source) !== true) {
         return false;
       }
-      const mine = signature(record, tree);
-      return (
-        !group.current.some((other) => other !== record && signature(other, tree) === mine) &&
-        !group.previous.some((other) => other !== source && signature(other, previousTree) === mine)
-      );
+      // Both have this signature (`sameLight`): it identifies them when no other member of either pass has it.
+      const mine = signature(record, tree)!;
+      currentCounts ??= countSignatures(group.current, tree);
+      previousCounts ??= countSignatures(group.previous, previousTree);
+      return currentCounts.get(mine) === 1 && previousCounts.get(mine) === 1;
     };
     for (const record of group.current) {
       const source = sourceOf(record);

@@ -516,6 +516,8 @@ async function noCssomLoad(browser: Browser, baseURL: string | undefined, entry:
     const options = {fullPage: true, animations: 'disabled', caret: 'hide'} as const;
     const clips = {} as Record<NoCssomView, Rect>;
     const shots = {} as Record<NoCssomView, Buffer>;
+    // Repainted like the final capture (tests/styles.spec.ts `heldStage`: raster noise after the theme upgraded).
+    await forceRepaint(page);
     clips.interim = reference?.clips.interim ?? (await measureSection(page, root)).clip;
     shots.interim = await page.screenshot({clip: clips.interim, ...options});
     await page.evaluate(() => (window as unknown as {__swcSsrRelease?: () => void}).__swcSsrRelease?.());
