@@ -428,6 +428,55 @@ const isUpgraded = (element: Element): boolean => {
 };
 
 /**
+ * `sp-table` normally creates selection cells during its first `willUpdate()`. The server adapter has already put
+ * equivalent cells in the light DOM. Point the table at its head cell and suppress only that initial creation call;
+ * the following `manageSelects()` call adopts and synchronizes the existing cells. Without this step hydration
+ * would leave the server cells in place and prepend a duplicate set.
+ */
+const tableManageCheckboxes = new WeakMap<object, PropertyDescriptor | undefined>();
+registerHydrationAdapter({
+  tag: 'sp-table',
+  beforeHydrate(element) {
+    const table = element as any;
+    const existing = Array.from(element.querySelectorAll<HTMLElement>('sp-table-checkbox-cell'));
+    if (existing.length === 0 || !table.selects || table.isVirtualized) {
+      return;
+    }
+    const rows = Array.from(element.querySelectorAll<HTMLElement>('sp-table-row'));
+    const head = element.querySelector<HTMLElement>('sp-table-head');
+    const directCell = (parent: Element): any => parent.querySelector(':scope > sp-table-checkbox-cell');
+    // A partial insertion should fall back to Spectrum's own creation rather than leave an incomplete selection
+    // column. This path is only a recovery for externally modified server markup.
+    if (rows.some((row) => !directCell(row)) || (head !== null && !directCell(head))) {
+      existing.forEach((cell) => cell.remove());
+      return;
+    }
+    if (head) {
+      table.tableHeadCheckboxCell = directCell(head);
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(table, 'manageCheckboxes');
+    tableManageCheckboxes.set(table, descriptor);
+    Object.defineProperty(table, 'manageCheckboxes', {
+      value() {},
+      configurable: true,
+      writable: true,
+    });
+  },
+  afterHydrate(element) {
+    const table = element as any;
+    if (tableManageCheckboxes.has(table)) {
+      const descriptor = tableManageCheckboxes.get(table);
+      tableManageCheckboxes.delete(table);
+      if (descriptor) {
+        Object.defineProperty(table, 'manageCheckboxes', descriptor);
+      } else {
+        delete table.manageCheckboxes;
+      }
+    }
+  },
+});
+
+/**
  * `MenuItem.itemChildren` (`menu/src/MenuItem.js`) computed from the item's declarative shadow root, for an item that
  * is not upgraded yet: clones of the elements assigned to its `icon` slot (without `slot`, with class `icon`) and of
  * the nodes assigned to its default slot.

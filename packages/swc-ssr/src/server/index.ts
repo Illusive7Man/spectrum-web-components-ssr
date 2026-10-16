@@ -58,4 +58,5 @@ export type {
   RenderSpectrumResult,
   ElementAdapter,
   AdapterContext,
+  LightDomInsertion,
 } from './types.js';

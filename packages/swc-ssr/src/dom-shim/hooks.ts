@@ -171,8 +171,8 @@ let droppedMutationHandler: DroppedMutationHandler | undefined;
 
 /**
  * The server renderer sets a handler while a render is in progress, so that structure changes components make at
- * runtime (e.g. `sp-table` inserting checkbox cells into its rows) are reported instead of silently missing from
- * the output. Returns the previous handler.
+ * runtime are reported instead of silently missing from the output, unless a component adapter reproduces them.
+ * Returns the previous handler.
  */
 export function setDroppedMutationHandler(handler: DroppedMutationHandler | undefined): DroppedMutationHandler | undefined {
   const previous = droppedMutationHandler;

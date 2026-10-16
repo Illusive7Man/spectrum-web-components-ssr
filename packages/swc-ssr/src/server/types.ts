@@ -226,6 +226,22 @@ export interface AdapterContext {
   report: ElementReport;
 }
 
+/**
+ * Light-DOM content an adapter asks the renderer to put first inside `target` after the final component pass.
+ * `target` must be a custom element rendered in that pass; `value` is rendered through the normal Spectrum SSR
+ * pipeline, including declarative shadow roots and stylesheet processing.
+ */
+export interface LightDomInsertion {
+  target: HTMLElement;
+  value: unknown;
+  /**
+   * Where the rendered value goes inside `target`. Only 'afterbegin' (first in the light DOM, matching
+   * `insertAdjacentElement('afterbegin', ...)`) is supported; it is also the default. Other values are reported
+   * and skipped.
+   */
+  position?: 'afterbegin';
+}
+
 /** Spectrum-specific behaviour lives ONLY in adapters (see `adapters/`). */
 export interface ElementAdapter {
   tag: string | RegExp;
@@ -239,4 +255,14 @@ export interface ElementAdapter {
   /** Pass >= 2, after the lifecycle, before render(). */
   beforeRender?(element: HTMLElement, ctx: AdapterContext): void;
   afterRender?(element: HTMLElement, ctx: AdapterContext): void;
+  /**
+   * Returns true when this adapter will reproduce a structural DOM change in `lightDomInsertions()`. The renderer
+   * then omits the usual `dropped DOM change` warning. Ancestor adapters are consulted as well as the target's.
+   */
+  handlesMutation?(element: HTMLElement, target: object, operation: string, node?: unknown): boolean;
+  /**
+   * Final-pass light-DOM nodes to render and insert at the beginning of their targets. This is intended for
+   * component-owned content created imperatively rather than returned from a Lit template.
+   */
+  lightDomInsertions?(element: HTMLElement): Iterable<LightDomInsertion> | undefined;
 }

@@ -348,8 +348,8 @@ export const THEME_PENDING_WARNING = 'theme pending: sp-theme not defined; trimm
  * or never - while their declarative shadow root still holds a trimmed or minified server `<style>` (or `<link>`,
  * `dedupe: 'link'`; a `'complete'` one is the whole theme). Such a theme provides only
  * what the server kept: the theme properties the server-rendered markup used (`trimTheme`), under the short names
- * (`minifyCustomProperties`). Content created on the client (an `sp-table`'s checkbox cells, a pending button's
- * progress circle, overlays), states entered later and restored elements reading names the server pruned or renamed
+ * (`minifyCustomProperties`). Content created on the client (a pending button's progress circle, overlays), states
+ * entered later and restored elements reading names the server pruned or renamed
  * find no theme values until `sp-theme` gets defined (its upgrade adopts the complete theme). 0 once `sp-theme` is
  * defined (`define()` upgrades every connected instance), and on pages without trimmed server CSS (no scan then).
  */

@@ -266,9 +266,10 @@ export const STATE_GROUPS: ReadonlyArray<readonly string[]> = [
 ];
 
 /**
- * Sets `attrs` (empty value) on every `sp-*` element below `rootSelector` (not `sp-theme`; light DOM, which is where the
- * demo's components are) that does not have them, and waits for the elements' updates. Returns the number of attributes
- * added; `clearStates` takes them off again.
+ * Sets `attrs` (empty value) on every compatible `sp-*` element below `rootSelector` (not `sp-theme`; light DOM, which
+ * is where the demo's components are) that does not have them, and waits for the elements' updates. Array/Object
+ * properties are skipped: an empty attribute is invalid JSON, so Lit converts it to `null` rather than a usable state.
+ * Returns the number of attributes added; `clearStates` takes them off again.
  */
 export async function applyStates(page: Page, rootSelector: string, attrs: readonly string[]): Promise<number> {
   return page.evaluate(
@@ -280,6 +281,12 @@ export async function applyStates(page: Page, rootSelector: string, attrs: reado
         if (!el.localName.startsWith('sp-') || el.localName === 'sp-theme') continue;
         for (const name of names) {
           if (el.hasAttribute(name)) continue;
+          const declaration = (
+            el.constructor as typeof HTMLElement & {
+              elementProperties?: Map<PropertyKey, {type?: unknown}>;
+            }
+          ).elementProperties?.get(name);
+          if (declaration?.type === Array || declaration?.type === Object) continue;
           el.setAttribute(name, '');
           added.push([el, name]);
         }

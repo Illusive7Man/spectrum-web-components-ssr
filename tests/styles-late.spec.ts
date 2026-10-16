@@ -39,10 +39,9 @@ import {
  *                         `drop-target` on table head cells / rows), whose rules read names only the parent defines (the
  *                         minifier judged ownership from the trimmed texts and renamed them: the disabled menu-item icon
  *                         was black).
- *                       - 0.2.2, sp-theme (table): `hydrateSpectrum()` must report the theme-pending warning (trimmed and
- *                         minified; not on the full page, nor for any other late tag), and the page after the definition
- *                         equals full. While sp-theme is missing, the checkbox cells the client creates lack theme values
- *                         the trimmed theme left out (the documented limitation): that view is only measured.
+ *                       - sp-theme (table): `hydrateSpectrum()` must report the theme-pending warning (trimmed and
+ *                         minified; not on the full page, nor for any other late tag). The selection checkbox cells are
+ *                         part of the server output, so their required theme values are retained before hydration too.
  *                     All cases of one entry run in one test (one `styles-late` record per entry).
  *   app --mod- override  an application stylesheet customises sp-action-button through Spectrum's public `--mod-*` hooks.
  *                     Without the client (`?nohydrate=1`) and hydrated, the trimmed and the minified page equal the full page
@@ -178,10 +177,7 @@ const LATE_CASES: LateCase[] = [
   {entry: 'breadcrumbs', tag: 'sp-breadcrumbs', childState: BREADCRUMBS_CHILD_STATE},
   {entry: 'table', tag: 'sp-table-cell'},
   {entry: 'table', tag: 'sp-table', childState: TABLE_CHILD_STATE},
-  // While sp-theme is missing, content the client creates (the checkbox cells of a selectable sp-table) reads theme
-  // properties the trimmed theme left out - the known limitation the theme-pending warning reports. Only the page after
-  // the definition must equal full; the missing view is measured (metrics `uncomparedPixels_sp-theme_missing_*`).
-  {entry: 'table', tag: 'sp-theme', compare: ['defined']},
+  {entry: 'table', tag: 'sp-theme'},
 ];
 
 const LATE_VIEWS = ['missing', 'state', 'defined'] as const;

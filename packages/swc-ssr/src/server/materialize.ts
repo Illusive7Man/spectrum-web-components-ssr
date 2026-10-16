@@ -393,15 +393,17 @@ export function materialize(value: unknown, depth = 0): unknown {
 
 const TEMPLATE_TOKEN = /<template\b[^>]*>|<\/template>/gi;
 
-/** Removes template-level hydration markers and `defer-hydration` from one raw region (outside nested templates). */
-function stripRegion(region: string): string {
+/** Removes template-level hydration markers from markup outside nested templates. */
+function stripRegion(region: string, removeDeferHydration = true): string {
   let out = '';
   let depth = 0;
   let last = 0;
-  const clean = (chunk: string): string =>
-    chunk
-      .replace(/<!--\/?lit-part[^>]*?-->|<!--lit-node \d+-->/g, '')
-      .replace(/(<[a-zA-Z][^\s>]*-[^\s>]*\b[^>]*?) defer-hydration(?=[\s/>])/g, '$1');
+  const clean = (chunk: string): string => {
+    const withoutMarkers = chunk.replace(/<!--\/?lit-part[^>]*?-->|<!--lit-node \d+-->/g, '');
+    return removeDeferHydration
+      ? withoutMarkers.replace(/(<[a-zA-Z][^\s>]*-[^\s>]*\b[^>]*?) defer-hydration(?=[\s/>])/g, '$1')
+      : withoutMarkers;
+  };
   TEMPLATE_TOKEN.lastIndex = 0;
   for (let match = TEMPLATE_TOKEN.exec(region); match !== null; match = TEMPLATE_TOKEN.exec(region)) {
     const chunk = region.slice(last, match.index);
@@ -418,6 +420,16 @@ function stripRegion(region: string): string {
   }
   const rest = region.slice(last);
   return out + (depth === 0 ? clean(rest) : rest);
+}
+
+/**
+ * Removes the Lit markers of a supplemental light-DOM template while preserving the markers inside declarative
+ * shadow roots and preserving `defer-hydration` on its custom-element hosts. The surrounding application template
+ * did not render this content, so its hydrator must ignore these markers; the inserted elements still hydrate their
+ * own shadow roots normally.
+ */
+export function stripSupplementalTemplateMarkers(markup: string): string {
+  return stripRegion(markup, false);
 }
 
 /**

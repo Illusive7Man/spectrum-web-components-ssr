@@ -4,6 +4,18 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 Until 1.0.0 a minor version may contain breaking changes.
 
+## [0.3.1] - unreleased
+
+### Added
+
+- Selectable `sp-table` elements now include their imperatively created head/row checkbox cells in the server HTML,
+  with full declarative shadow roots, selection state, labels and trimmed/deduplicated styles. Spectrum's own
+  `manageCheckboxes()` runs on the server; the adapter records the `TableCheckboxCell` instances it creates and renders
+  them with their properties, so no table logic is duplicated. The client hydration adapter adopts those cells instead
+  of creating duplicates. Server adapters can support similar component-owned light DOM with `handlesMutation()` and
+  `lightDomInsertions()` (`LightDomInsertion`, `position: 'afterbegin'`); the supplemental render lives in
+  `server/light-dom-insertions.ts`. This turns the table's former flicker red into a green row of the matrix.
+
 ## [0.3.0] - unreleased
 
 Render speed, fewer bytes (details: `docs/DESIGN.md` "Performance" and "Style de-duplication", `docs/API.md` "Styles").

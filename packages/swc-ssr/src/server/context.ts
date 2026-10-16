@@ -25,6 +25,7 @@ import {
   type RafSink,
 } from '../dom-shim/hooks.js';
 import {setSelectorErrorHandler, type SelectorErrorHandler} from '../dom-shim/select.js';
+import {findAdapter} from './adapters/registry.js';
 import {isSpectrumClass} from './adapters/spectrum-class.js';
 import type {ServerTree} from './server-tree.js';
 import type {TreeRealm} from './realm.js';
@@ -641,10 +642,10 @@ function describeNode(node: any): string {
 
 /**
  * A component changed the structure of a node the server renders from templates (a tree-backed facade, or an
- * element rendered without tree information): the change cannot appear in the output (it appears only after
- * hydration). The message goes to the element whose code made the change (its lifecycle scope), else to the
- * closest rendered custom element containing the target, else to the render. Only the final passes report (pass
- * 1 has no structure at all).
+ * element rendered without tree information). Ancestor adapters can recognize changes they reproduce later as
+ * supplemental light DOM; every other change is reported because it cannot appear in the output. The message goes
+ * to the element whose code made the change (its lifecycle scope), else to the closest rendered custom element
+ * containing the target, else to the render. Only the final passes report (pass 1 has no structure at all).
  */
 function reportDroppedMutation(session: RenderSession, target: any, operation: string, node: unknown): void {
   if (session.ended || session.pass < 2) {
@@ -656,10 +657,20 @@ function reportDroppedMutation(session: RenderSession, target: any, operation: s
   let report = scope?.session === session ? scope.report : undefined;
   for (let current = target, depth = 0; current && depth < 10_000; depth++) {
     const own = context?.reportOfInstance(current);
-    if (own) {
+    if (own && !host) {
       host = current;
       report ??= own;
-      break;
+    }
+    const adapter = typeof current.localName === 'string' ? findAdapter(current.localName) : undefined;
+    if (adapter?.handlesMutation) {
+      try {
+        if (adapter.handlesMutation(current, target, operation, node)) {
+          return;
+        }
+      } catch (error) {
+        const messages = report ? report.warnings : session.orphanWarnings;
+        messages.push(`adapter handlesMutation: ${errorMessage(error)}`);
+      }
     }
     const parent = current.parentNode;
     current = parent && parent.nodeType === 11 ? parent.host : parent;

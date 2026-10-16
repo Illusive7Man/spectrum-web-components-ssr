@@ -900,8 +900,8 @@ function registerTargetTests(target: StylesTarget, timeoutMs: number): void {
           const problems = flickerProblems(measured, judge);
           if (problems.length === 0) continue;
 
-          // Over the normal threshold. Some entries are over it with the full CSS too (e.g. sp-table inserts cells on
-          // hydration); only what the trimming adds on top of that is a failure.
+          // Over the normal threshold. Some entries can be over it with the full CSS too; only what the trimming
+          // adds on top of that is a failure.
           control ??= await measureFlicker(await context.newPage(), target, 'full');
           ctx.metrics.controlRatio = control.ratio;
           ctx.metrics.controlCls = control.cls;

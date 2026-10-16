@@ -176,6 +176,7 @@ first PR.
 | `sp-breadcrumbs` + client adapter | `packages/breadcrumbs` | overflow decided without layout |
 | `sp-split-view` | `packages/split-view` | start position without measured sizes |
 | `sp-color-wheel` | `packages/color-wheel` | track geometry from tokens instead of measured size |
+| `sp-table` + client adapter | `packages/table` | renders imperative selection cells on the server and adopts them during hydration |
 | language inspector | `tools/reactive-controllers` (`LanguageResolutionController`) | warns when the locale falls back to `navigator.language` |
 | client: `sp-slider`, `sp-checkbox`, `matchMedia` adapter | `packages/slider`, `packages/checkbox`, `packages/picker` / `action-menu` / `contextual-help` | hydration details |
 

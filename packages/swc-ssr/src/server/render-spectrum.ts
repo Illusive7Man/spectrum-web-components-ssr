@@ -40,8 +40,13 @@ import {controllersOf, disconnectAll, hasPendingUpdate, isManaged, runDocumentLi
 import {needsAdoptionCheck, verifyAdoptions} from './plan.js';
 import {TreeRealm} from './realm.js';
 import {ServerTree} from './server-tree.js';
-import {awaitLazyDefinitions, finalizeHtml, takeTextareaContent} from './materialize.js';
+import {
+  awaitLazyDefinitions,
+  finalizeHtml,
+  takeTextareaContent,
+} from './materialize.js';
 import {applyEdits, lightMutationEdits, type Edit} from './light-mutations.js';
+import {planLightDomInsertions, renderLightDomInsertions} from './light-dom-insertions.js';
 import {SpectrumElementRenderer} from './spectrum-element-renderer.js';
 import {ThemeRenderer} from './theme-renderer.js';
 import {inspectors} from './adapters/registry.js';
@@ -500,6 +505,7 @@ async function renderSession(value: unknown, session: RenderSession): Promise<Re
     // marker removal (one copy of the page less); otherwise the styles are resolved on the changed page.
     const collector = styleCollectorOf(session);
     let pendingEdits: Edit[] = [];
+    const pageEdits: Edit[] = [];
     if (last.realm && last.realm.lightMutations.size > 0) {
       try {
         const realm = last.realm;
@@ -520,14 +526,35 @@ async function renderSession(value: unknown, session: RenderSession): Promise<Re
           (message) => session.debug(message),
           htmlTree
         );
-        if (collector) {
-          html = applyEdits(html!, edits);
-        } else {
-          pendingEdits = edits;
-        }
+        pageEdits.push(...edits);
       } catch (error) {
         session.orphanWarnings.push(`could not apply light-DOM attribute changes: ${errorMessage(error)}`);
       }
+    }
+    if (settled) {
+      const insertions = planLightDomInsertions(last);
+      if (insertions.length > 0) {
+        try {
+          pageEdits.push(
+            ...(await renderLightDomInsertions(
+              insertions,
+              html!,
+              htmlTree,
+              last,
+              renderersFor(options),
+              progress.created,
+              collect
+            ))
+          );
+        } catch (error) {
+          session.orphanWarnings.push(`could not render light-DOM insertions: ${errorMessage(error)}`);
+        }
+      }
+    }
+    if (collector) {
+      html = applyEdits(html!, pageEdits);
+    } else {
+      pendingEdits = pageEdits;
     }
     // Before the elements are disconnected (their controllers still hold what they resolved).
     inspect(last);

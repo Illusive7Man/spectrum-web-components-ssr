@@ -170,8 +170,6 @@ before their children, in one task (docs/API.md "What trimming can break").
 
 * picker, breadcrumbs: after hydration the roving `tabindex="0"` sits on the selected menu item, a client render puts it on the first item.
 * swatch: the selected swatch carries an extra `focusable` attribute.
-* table: `sp-table` inserts its checkbox cells at runtime, so they appear only after hydration (1.4 % pixel change);
-  the render report lists them as `dropped DOM change` warnings.
 * Layout-dependent state (tabs indicator, color handles, split-view sizes) is approximated on the server and corrected after hydration.
 * Phones: the server's `matchMedia` never matches, so the server always renders the desktop state. Phones hydrate it
   without a mismatch and then re-render into the mobile state (tray, `mobile-view`, modal contextual help) on the next

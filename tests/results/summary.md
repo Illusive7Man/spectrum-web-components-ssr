@@ -1,8 +1,8 @@
 # Spectrum SSR support matrix
 
-- Run: 2026-10-16T05:15:44.294Z
-- **55/59 components fully green**
-- Per check: SSR markup 59/59, hydration 59/59, flicker 58/59, fidelity 56/59, interaction 20/20
+- Run: 2026-10-16T16:52:32.048Z
+- **56/59 components fully green**
+- Per check: SSR markup 59/59, hydration 59/59, flicker 59/59, fidelity 56/59, interaction 20/20
 - Thresholds: flicker < 0.200 % of pixels, CLS < 0.01, fidelity = post-hydration DOM equals the client-rendered DOM
 - Legend: `ok` passed, `FAIL` failed, `-` not run / not applicable. Flicker % = differing pixels between the pure-SSR paint and the hydrated paint; the number in `ok (n)` is the count of hydrated custom elements (sp-* and others, e.g. overlay-trigger).
 
@@ -56,7 +56,7 @@
 | status-light | ok | ok (20) | 0.000 | 0.0000 | ok | - | 494.2 -> 171.3 (76.7) | known: Stateless; aria-disabled is applied in updated() when disabled. |
 | swatch | ok | ok (28) | 0.000 | 0.0000 | FAIL (-1/+1 lines) | ok | 556.6 -> 223.3 (171.6) | fidelity: post-hydration DOM differs from the client-rendered DOM (-1/+1 lines; full trees in tests/results/fidelity/swatch.ssr.txt and swatch.csr.txt); known: SSR difference: the selected swatch arrives with its final tabindex="0", so its first client update also sets the focusable attribute (client-side rendering ... |
 | switch | ok | ok (13) | 0.000 | 0.0000 | ok | ok | 594.5 -> 287.9 (196.6) | known: The label is the default slot; the checked state is reflected from the attribute. |
-| table | ok | ok (77) | 1.443 FAIL | 0.0171 | ok | - | 616.8 -> 158.4 (144.4) | flicker: 12169/843520 px differ between SSR and hydrated paint (max 0.200 %) \| cumulative layout shift (window.__cls) \| section size changed on hydration: 1281x660 -> 1281x770 (tolerance 1px); known: SSR difference: with selects set, sp-table inserts sp-table-checkbox-cell elements into the light DOM of the head and every row at runtime (manageCheckboxes)... |
+| table | ok | ok (77) | 0.000 | 0.0000 | ok | - | 814.2 -> 298.3 (250.1) | known: Selectable tables include the sp-table-checkbox-cell column in the server output; hydration adopts those generated cells instead of creating duplicates. |
 | tabs | ok | ok (53) | 0.069 | 0.0000 | ok | ok | 572.4 -> 189.6 (158.2) | known: The selection indicator geometry and tab-panel visibility depend on the selected tab; sp-tabs reads its sp-tab children (light DOM) and measures offsets whic... |
 | tags | ok | ok (26) | 0.000 | 0.0000 | ok | - | 610.9 -> 172.7 (97.5) | known: Avatar and icon slots are detected through light-DOM presence queries; images are inline data: URIs. |
 | textfield | ok | ok (30) | 0.000 | 0.0000 | ok | ok | 879.2 -> 434.8 (235.8) | known: Native input/textarea live in the shadow root; validity (pattern) is evaluated at render time so the correct help-text slot is shown. Growing multiline textf... |
@@ -78,27 +78,27 @@ Totals over the 59 catalog entries' own pages (each rendered alone):
 
 | | full | trimmed | minified |
 |---|---|---|---|
-| CSS KiB | 36236.2 | 10679.0 | 6844.4 |
-| html KiB | 37253.9 | 11730.4 | 7898.5 |
-| gzip KiB | 3471.1 | 853.6 | 606.1 |
+| CSS KiB | 36433.6 | 10818.9 | 6950.1 |
+| html KiB | 37460.4 | 11879.9 | 8013.9 |
+| gzip KiB | 3497.3 | 864.3 | 612.2 |
 
 Whole-catalog page `/`:
 
 | Mode | html KiB | CSS KiB | CSS share of html | CSS vs full | gzip KiB | gzip vs full |
 |---|---|---|---|---|---|---|
-| full | 19105.8 | 18121.9 | 94.9 % | 100.0 % | 1488.8 | 100.0 % |
-| trimmed | 13632.5 | 12616.6 | 92.5 % | 69.6 % | 997.3 | 67.0 % |
-| minified | 9323.9 | 8305.3 | 89.1 % | 45.8 % | 643.6 | 43.2 % |
+| full | 19312.3 | 18319.3 | 94.9 % | 100.0 % | 1514.9 | 100.0 % |
+| trimmed | 13814.1 | 12788.7 | 92.6 % | 69.8 % | 1015.0 | 67.0 % |
+| minified | 9463.0 | 8434.7 | 89.1 % | 46.0 % | 650.3 | 42.9 % |
 
 Page `/` checks: oracle ok, minified ok, hydration ok, restore ok, post ok, release ok, size ok
-Page `/` notes: size: trimmed CSS is 69.6 % of the full CSS (target < 25 %; 18121.9 -> 12616.6 KiB)
+Page `/` notes: size: trimmed CSS is 69.8 % of the full CSS (target < 25 %; 18319.3 -> 12788.7 KiB)
 
 | Component | Oracle | Minified | States | Hydration | Flicker % | Restore | Post | Post states | Release | Late | App --mod- | No CSSOM | CSS KiB full -> trimmed (minified) | Trimmed share | gzip KiB full -> trimmed (minified) | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | accordion | ok | ok | ok | ok | 0.000 | ok | ok | ok | ok | - | - | - | 424.7 -> 80.6 (71.2) | 19.0 % | 40.0 -> 6.4 (5.0) |  |
 | action-bar | ok | ok | - | ok | 0.000 | ok | ok | - | ok | - | - | - | 598.1 -> 153.2 (96.7) | 25.6 % | 61.5 -> 17.8 (13.7) | size: trimmed CSS is 25.6 % of the full CSS (target < 25 %; 598.1 -> 153.2 KiB) |
 | action-button | ok | ok | ok | ok | 0.000 | ok | ok | ok | ok | - | ok | - | 770.3 -> 375.6 (222.1) | 48.8 % | 47.4 -> 11.8 (9.0) | size: trimmed CSS is 48.8 % of the full CSS (target < 25 %; 770.3 -> 375.6 KiB) |
-| action-group | ok | ok | ok | ok | 0.000 | ok | ok | ok | ok | - | - | - | 856.6 -> 277.5 (180.4) | 32.4 % | 61.7 -> 11.5 (8.9) | size: trimmed CSS is 32.4 % of the full CSS (target < 25 %; 856.6 -> 277.5 KiB) |
+| action-group | ok | ok | ok | ok | 0.000 | ok | ok | ok | ok | - | - | - | 856.6 -> 277.5 (180.4) | 32.4 % | 61.7 -> 11.5 (8.9) | post-states: trimmed disabled, minified disabled differed (2 px) on the first attempt and matched after 3 attempt(s): load-to-load variation of the same CSS; size: trimmed CSS is 32.4 % of the full CSS (target < 25 %; 856.6 -> 277.5 KiB) |
 | action-menu | ok | ok | - | ok | 0.000 | ok | ok | - | ok | - | - | - | 1089.4 -> 273.0 (215.4) | 25.1 % | 87.6 -> 29.8 (23.6) | size: trimmed CSS is 25.1 % of the full CSS (target < 25 %; 1089.4 -> 273.0 KiB) |
 | alert-banner | ok | ok | - | ok | 0.000 | ok | ok | - | ok | - | - | - | 443.1 -> 94.6 (57.8) | 21.4 % | 48.7 -> 11.6 (7.3) |  |
 | alert-dialog | ok | ok | - | ok | 0.000 | ok | ok | - | ok | - | - | - | 542.1 -> 119.7 (65.6) | 22.1 % | 58.3 -> 9.9 (6.4) |  |
@@ -143,7 +143,7 @@ Page `/` notes: size: trimmed CSS is 69.6 % of the full CSS (target < 25 %; 1812
 | status-light | ok | ok | - | ok | 0.000 | ok | ok | - | ok | - | - | - | 494.2 -> 171.3 (76.7) | 34.7 % | 38.0 -> 5.5 (3.6) | size: trimmed CSS is 34.7 % of the full CSS (target < 25 %; 494.2 -> 171.3 KiB) |
 | swatch | ok | ok | ok | ok | 0.000 | ok | ok | ok | ok | - | - | - | 556.6 -> 223.3 (171.6) | 40.1 % | 41.9 -> 8.9 (8.0) | size: trimmed CSS is 40.1 % of the full CSS (target < 25 %; 556.6 -> 223.3 KiB) |
 | switch | ok | ok | ok | ok | 0.000 | ok | ok | ok | ok | - | - | - | 594.5 -> 287.9 (196.6) | 48.4 % | 41.0 -> 8.7 (6.8) | size: trimmed CSS is 48.4 % of the full CSS (target < 25 %; 594.5 -> 287.9 KiB) |
-| table | ok | ok | - | ok | 1.443 (as full) | ok | ok | - | ok | ok | - | - | 616.8 -> 158.4 (144.4) | 25.7 % | 49.6 -> 10.8 (9.8) | hydration: trimmed: flicker over the threshold with the full CSS as well (12169/843520 px differ between SSR and hydrated paint (max 0.200 %); cumulative layout shift 0.0171 (max 0.01); size changed on hydrat...; size: trimmed CSS is 25.7 % of the full CSS (target < 25 %; 616.8 -> 158.4 KiB) |
+| table | ok | ok | - | ok | 0.000 | ok | ok | - | ok | ok | - | - | 814.2 -> 298.3 (250.1) | 36.6 % | 75.7 -> 21.5 (15.9) | size: trimmed CSS is 36.6 % of the full CSS (target < 25 %; 814.2 -> 298.3 KiB) |
 | tabs | ok | ok | ok | ok | 0.069 | ok | ok | ok | ok | ok | - | ok | 572.4 -> 189.6 (158.2) | 33.1 % | 50.5 -> 12.9 (11.2) | restore: 2 capture(s) differed (0 px) on the first attempt and matched after 2 attempt(s): load-to-load variation of the same CSS; size: trimmed CSS is 33.1 % of the full CSS (target < 25 %; 572.4 -> 189.6 KiB) |
 | tags | ok | ok | - | ok | 0.000 | ok | ok | - | ok | - | - | - | 610.9 -> 172.7 (97.5) | 28.3 % | 57.8 -> 10.8 (7.3) | size: trimmed CSS is 28.3 % of the full CSS (target < 25 %; 610.9 -> 172.7 KiB) |
 | textfield | ok | ok | ok | ok | 0.000 | ok | ok | ok | ok | - | - | - | 879.2 -> 434.8 (235.8) | 49.4 % | 96.0 -> 17.7 (10.9) | size: trimmed CSS is 49.4 % of the full CSS (target < 25 %; 879.2 -> 434.8 KiB) |
@@ -164,16 +164,16 @@ Page `/` notes: size: trimmed CSS is 69.6 % of the full CSS (target < 25 %; 1812
 |---|---|---|---|---|---|---|---|---|
 | action-button | ok | ok | - | 390.8 -> 20.8 | 33.8 (6 / 40) | - | - |  |
 | badge | ok | ok | - | 247.4 -> 14.2 | 17.2 (5 / 29) | - | - |  |
-| button | ok | ok | ok | 846.5 -> 28.4 | 77.0 (12 / 62) | 174 -> 499 / 501 | 187 / 171 |  |
+| button | ok | ok | ok | 846.5 -> 28.4 | 77.0 (12 / 62) | 190 -> 495 / 498 | 203 / 202 |  |
 | checkbox | ok | ok | - | 300.8 -> 28.0 | 25.8 (8 / 50) | - | - |  |
 | divider | ok | ok | - | 16.6 -> 4.9 | 4.0 (3 / 8) | - | - |  |
 | link | ok | ok | - | 29.1 -> 8.1 | 5.1 (3 / 10) | - | - |  |
 | menu | ok | ok | - | 185.5 -> 25.2 | 33.4 (10 / 33) | - | - |  |
-| picker | ok | ok | ok | 538.8 -> 66.5 | 59.4 (13 / 80) | 176 -> 666 / 679 | 175 / 174 |  |
+| picker | ok | ok | ok | 538.8 -> 66.5 | 59.4 (13 / 80) | 182 -> 680 / 672 | 223 / 172 |  |
 | progress-bar | ok | ok | - | 113.8 -> 15.3 | 17.0 (5 / 23) | - | - |  |
 | status-light | ok | ok | - | 177.9 -> 8.4 | 14.3 (4 / 22) | - | - |  |
 | switch | ok | ok | - | 295.8 -> 9.9 | 31.7 (5 / 15) | - | - |  |
-| tabs | ok | ok | ok | 220.1 -> 36.2 | 35.3 (12 / 59) | 172 -> 492 / 497 | 166 / 168 |  |
+| tabs | ok | ok | ok | 220.1 -> 36.2 | 35.3 (12 / 59) | 183 -> 525 / 513 | 198 / 185 |  |
 | textfield | ok | ok | - | 462.4 -> 32.4 | 40.2 (7 / 32) | - | - |  |
 | theme | ok | ok | - | 157.7 -> 10.5 | 40.9 (9 / 26) | - | - |  |
 

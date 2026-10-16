@@ -85,6 +85,8 @@ export class ServerTree {
   private readonly idsByNode = new Map<Element, number>();
   private readonly shadows = new Map<Element, Document>();
   private readonly hosts = new Map<Document, Element>();
+  /** The detached declarative-shadow template of each host (kept for source locations). */
+  private readonly shadowTemplates = new Map<Element, Element>();
   private readonly shadowTemplateAttributes = new Map<Document, Record<string, string>>();
   /** Marked elements in construction order (element, its shadow content, then its light children). */
   private readonly ordered: Element[] = [];
@@ -214,6 +216,7 @@ export class ServerTree {
       );
       if (template && !this.shadows.has(child)) {
         const content = template.children.find(isDocumentNode);
+        this.shadowTemplates.set(child, template);
         detach(template);
         if (content) {
           // The content fragment is the template's child: make it a root of its own.
@@ -259,6 +262,28 @@ export class ServerTree {
 
   shadowOf(node: Element): Document | undefined {
     return this.shadows.get(node);
+  }
+
+  /**
+   * Source offset immediately before a marked element's light DOM: after its declarative-shadow template when it
+   * has one, otherwise after its start tag. Only available on trees built with `{locations: true}`.
+   */
+  lightDomStart(id: number): number | undefined {
+    if (!this.hasLocations) {
+      return undefined;
+    }
+    const host = this.nodesById.get(id);
+    if (!host) {
+      return undefined;
+    }
+    const template = this.shadowTemplates.get(host);
+    const location = (template ?? host) as Element & {
+      sourceCodeLocation?: {endOffset?: number; startTag?: {endOffset?: number}};
+    };
+    const parsedOffset = template
+      ? location.sourceCodeLocation?.endOffset
+      : location.sourceCodeLocation?.startTag?.endOffset;
+    return parsedOffset === undefined ? undefined : this.sourceOffset(parsedOffset);
   }
 
   /** Host element of a shadow root content node. */

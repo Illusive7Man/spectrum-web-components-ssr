@@ -16,9 +16,18 @@ import {pickerAdapter} from './picker.js';
 import {breadcrumbsAdapter} from './breadcrumbs.js';
 import {colorWheelAdapter} from './color-wheel.js';
 import {splitViewAdapter} from './split-view.js';
+import {tableAdapter} from './table.js';
 import {languageInspector} from './language.js';
 
-const builtIn = [themeAdapter, overlayAdapter, pickerAdapter, breadcrumbsAdapter, colorWheelAdapter, splitViewAdapter];
+const builtIn = [
+  themeAdapter,
+  overlayAdapter,
+  pickerAdapter,
+  breadcrumbsAdapter,
+  colorWheelAdapter,
+  splitViewAdapter,
+  tableAdapter,
+];
 for (const adapter of builtIn) {
   registerAdapter(adapter);
 }

@@ -109,6 +109,6 @@ export const entry: CatalogEntry = {
     </div>
   `,
   notes:
-    'SSR difference: with selects set, sp-table inserts sp-table-checkbox-cell elements into the light DOM of the head and every row at runtime (manageCheckboxes); the server does not render light-DOM insertions, so the checkbox column appears on hydration (flicker).',
+    'Selectable tables include the sp-table-checkbox-cell column in the server output; hydration adopts those generated cells instead of creating duplicates.',
   interactive: false,
 };

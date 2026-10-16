@@ -136,6 +136,21 @@ export interface ElementAdapter {
                                                                     // before attributes/properties/lifecycle
   beforeRender?(element: HTMLElement, ctx: AdapterContext): void;   // pass >= 2, after lifecycle, before render()
   afterRender?(element: HTMLElement, ctx: AdapterContext): void;    // pass >= 2
+  handlesMutation?(element: HTMLElement, target: object, operation: string, node?: unknown): boolean;
+                                                                    // true when lightDomInsertions reproduces it
+  lightDomInsertions?(element: HTMLElement): Iterable<LightDomInsertion> | undefined;
+                                                                    // fully SSR'd content prepended to final targets
+}
+export interface LightDomInsertion {
+  target: HTMLElement;             // a custom element rendered in the final pass
+  value: unknown;                  // rendered through a supplemental two-pass Spectrum render
+  position?: 'afterbegin';        // the only supported (and default) position: first in the target's light DOM
+}| undefined;
+                                                                    // fully SSR'd content prepended to final targets
+}
+export interface LightDomInsertion {
+  target: HTMLElement;             // a custom element rendered in the final pass
+  value: unknown;                  // rendered through a supplemental two-pass Spectrum render
 }
 export interface AdapterContext {
   id: number;                     // data-swc-ssr id in this pass; -1 in prepare() of pre-built (not yet rendered) elements
@@ -191,8 +206,9 @@ export function styleHeadOf(styles: StylesReport | undefined, hint?: StyleHeadHi
 
 Built-in adapters (`packages/swc-ssr/src/server/adapters/`): `sp-theme` (lifecycle `none`), `sp-overlay` (kept closed,
 `prepare`), `sp-picker` (selection safety net), `sp-breadcrumbs` / `sp-split-view` / `sp-color-wheel` (layout-dependent
-state computed without layout, `prepare`). An internal inspector (`adapters/language.ts`) runs over the final pass's
-elements and warns about elements whose locale falls back to `navigator.language`.
+state computed without layout, `prepare`), and `sp-table` (fully rendered selection cells inserted into the final light
+DOM). An internal inspector (`adapters/language.ts`) runs over the final pass's elements and warns about elements whose
+locale falls back to `navigator.language`.
 
 ### Lifecycle and `renderOptions`
 
@@ -310,7 +326,7 @@ Messages that can appear:
 | `unhandled rejection: ...` | the element whose hook created the promise, else `#render` | a rejection nobody handled, of a promise created inside the render's scope (never an unrelated one), arriving while the render is in progress (later ones: see `unhandledRejection` above) |
 | `disconnectedCallback: ...` | element | its `disconnectedCallback` threw at the end of the render |
 | `updated after its markup was emitted in pass N (changed: a, b); another pass is made` | element | a `full` element was updated after its markup was emitted (last pass: `the output shows the earlier state`) |
-| `dropped DOM change: <op>(<node>) on <target> [in <host>] has no effect on the server output ...` | the element whose code made the change, else the closest rendered custom element, else `#render` | structure changes on rendered nodes (from pass 2 on), e.g. `sp-table` checkbox cells |
+| `dropped DOM change: <op>(<node>) on <target> [in <host>] has no effect on the server output ...` | the element whose code made the change, else the closest rendered custom element, else `#render` | structure changes on rendered nodes (from pass 2 on) that no adapter reproduces in the final light DOM |
 | `light-DOM attribute change not applied: ...` | host or `#render` | an attribute change on a plain element could not be located in the final output: no element with its signature (tag, `id`, `name`, `slot`, `type`, `role`, `part`, `for`, `href`, `src`, `class`), or several, not exactly one with its content (child tags, text), and the scope's structure along the element's path changed (with an unchanged structure the element at the recorded position gets the change) |
 | `adopted candidate rejected: light DOM differs from the pass-N <tag> it was matched with ...; another pass is made` (or `upstream attributes / properties differ ...`) | element | the element took over the previous-pass instance of another element of the same kind (see above); the next pass corrects it (last pass: `the output may show the state of that element`) |
 | `locale: no language is set ...` | element | its locale falls back to `navigator.language` (pass `lang`, or set `<sp-theme lang>`) |
@@ -547,8 +563,8 @@ differing pixels, the buttons lose their background and shrink from 32 to 22.8 p
   CSS): the bridged server theme keeps the server's values for the renamed names until each element hydrates.
 * **`sp-theme` defined late, or never** (a lazily loaded theme chunk, an app that never defines it): until it upgrades,
   the theme's server `<style>` holds only what the server kept - the theme properties the rendered markup used
-  (`trimTheme`), under the short names (`minifyCustomProperties`). Content the client creates meanwhile (an
-  `sp-table`'s checkbox cells, a pending button's progress circle, overlays), states entered after hydration and
+  (`trimTheme`), under the short names (`minifyCustomProperties`). Content the client creates meanwhile (a pending
+  button's progress circle, overlays), states entered after hydration and
   restored elements that read pruned or renamed names find no theme values until `sp-theme` is defined (measured,
   table page with `?late=sp-theme`: 8,139 px trimmed / 106,988 px minified differ from full while it is missing, 0 px
   after the definition). `trimTheme` and `minifyCustomProperties` assume that `sp-theme` is defined before client-side
@@ -678,8 +694,9 @@ name and that is `sp-*`, has a shadow root, or is already defined. Undefined cus
 declarative shadow root and without `defer-hydration` (e.g. Angular component hosts such as `<app-root>`) are not
 awaited. The agnostic path removes `defer-hydration` from every deferred candidate, not only `sp-*`.
 
-Besides the adapters (built in: `sp-picker`, `sp-slider`, `sp-breadcrumbs`, `sp-checkbox`, a `MatchMediaController`
-adapter for every hydrating element that has `MatchMediaController`s - `sp-picker` / `sp-action-menu` /
+Besides the adapters (built in: `sp-picker`, `sp-slider`, `sp-breadcrumbs`, `sp-checkbox`, `sp-table` (adopts the
+server-rendered selection cells), a `MatchMediaController` adapter for every hydrating element that has
+`MatchMediaController`s - `sp-picker` / `sp-action-menu` /
 `sp-contextual-help`, subclasses registered under other tags, application components - and, since 0.2.0, a
 `Menu` adapter for every element built on `menu/src/Menu.js` that breaks the `updateCache()` / `getUpdateComplete()`
 cycle a menu hydrated more than a frame after its items were defined got stuck in, so `hydrateSpectrum()` may run any

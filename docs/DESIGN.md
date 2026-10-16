@@ -247,6 +247,11 @@ Server (`swc-ssr/server`, all outside Spectrum sources):
   targets in dialogs, menu groups, split view) and in shadow roots (e.g. the `tabindex` / `disabled` checkbox moves
   onto its input) - are written into the output (`light-mutations.ts`), so the references resolve without
   JavaScript and the client reuses those ids instead of adding a second set.
+* Component-owned structural light DOM can be supplied by an adapter and rendered through the same two-pass pipeline
+  (`light-dom-insertions.ts`). `sp-table` uses this for its selection checkbox cells: Spectrum's own
+  `manageCheckboxes()` runs on the server and creates real `TableCheckboxCell` instances, the adapter records them as
+  their insertion is dropped, and renders each recorded instance by binding its reactive properties, so no table logic
+  is re-implemented. Insertions go first in the target's light DOM (`position: 'afterbegin'`, the only position).
 * The initial `slotchange` emulation also dispatches one event at the shadow root (`swatch/src/SwatchGroup.js` listens
   there). Client and server share the binding detection (`src/shared/slot-bindings.ts`).
 * DOM shim: HTML constraint validation for form controls (`required`, `pattern`, `type`, `min`/`max`), the Popover API
@@ -286,9 +291,8 @@ renders, otherwise after the hydrating update (CSR timing); a remaining mismatch
 and is reported. Server output is rendered with `deferHydration: true` and the light-DOM elements are enabled in
 document order, so first updates run in CSR order regardless of the order definitions load in.
 
-Known differences that remain (see `tests/results/summary.md`): light-DOM insertions made by components on the server
-(e.g. `sp-table` checkbox cells) are not rendered (reported as `dropped DOM change` warnings); state that depends on timing in client-side rendering (which item of a
-menu starts with `tabindex="0"` in `sp-picker` / `sp-action-menu` in `sp-breadcrumbs`) can settle differently, and an
+Known differences that remain (see `tests/results/summary.md`): state that depends on timing in client-side rendering
+(which item of a menu starts with `tabindex="0"` in `sp-picker` / `sp-action-menu` in `sp-breadcrumbs`) can settle differently, and an
 element's first client update sees the server's final attributes (`sp-swatch` sets `focusable` on the selected swatch).
 Layout-dependent values are approximated without layout (`sp-tabs` selection indicator, `sp-color-area` handle) and
 corrected after hydration.
@@ -352,8 +356,9 @@ it, and a server yields between requests anyway.
   elements whose locale falls back to `navigator.language`. The demo always passes the page language.
 * L1: fallback shadow markup without previous-pass markers. L2: `full` elements updated after their markup was
   emitted are reported and trigger one more pass (still at most 3). L3: adapters get the real pass, key and
-  `previousId`. L4: pre-instantiation uses a Set. L5: structure changes on rendered nodes are reported (`dropped DOM
-  change`), via `setDroppedMutationHandler` in `dom-shim/hooks.ts` and three call sites in `install.ts`.
+  `previousId`. L4: pre-instantiation uses a Set. L5: unhandled structure changes on rendered nodes are reported
+  (`dropped DOM change`), via `setDroppedMutationHandler` in `dom-shim/hooks.ts` and three call sites in `install.ts`;
+  an adapter can reproduce a recognized mutation as fully rendered final light DOM (`sp-table` checkbox cells).
 
 ### Client and DOM shim (review H2, M8, M9, L6-L8)
 
@@ -688,7 +693,7 @@ real CSS difference still shows. Per catalog entry and for `/`:
 | `post-hydration:states` | interactive entries, after hydration: hover, focus, click the first control, `disabled` on it, `size="xl"` on the first button, `quiet` toggled, `selected` on the first menu item / tab, `invalid` on the first text field (each awaited through `updateComplete`); every step equals the full page |
 | `removeServerStyles` | `?removeStyles=1` on full and trimmed pages: no `<style>` left in sp-* shadow roots, paint equals the full page |
 | `size` | `/styles.json`: trimmed smaller than full; `report.styles` consistent |
-| `late definition: <tag>` (tests/styles-late.spec.ts) | `?late=<tag>` holds a definition back until after `hydrateSpectrum()`: `sp-theme` (button, theme, table), `sp-tab` (tabs), `sp-menu-item` and `sp-menu` (menu), `sp-breadcrumbs` (breadcrumbs), `sp-table-cell` and `sp-table` (table). For the late parents, a `state` view changes state on the children while the parent is missing (icon + `disabled` / `focused` on menu items, `disabled` on a breadcrumb item, `active` / `drop-target` on a table head cell / row). Trimmed and minified equal full while the tag is missing, in that state, and after it arrived. Late `sp-theme` on the table page: the theme-pending warning is reported, and only the defined view must match (client-created checkbox cells lack pruned theme values while it is missing). Afterwards no marked `<style>` is left and every hydrated Lit element runs on adopted sheets. All cases of one entry run in one test |
+| `late definition: <tag>` (tests/styles-late.spec.ts) | `?late=<tag>` holds a definition back until after `hydrateSpectrum()`: `sp-theme` (button, theme, table), `sp-tab` (tabs), `sp-menu-item` and `sp-menu` (menu), `sp-breadcrumbs` (breadcrumbs), `sp-table-cell` and `sp-table` (table). For the late parents, a `state` view changes state on the children while the parent is missing (icon + `disabled` / `focused` on menu items, `disabled` on a breadcrumb item, `active` / `drop-target` on a table head cell / row). Trimmed and minified equal full while the tag is missing, in that state, and after it arrived. Afterwards no marked `<style>` is left and every hydrated Lit element runs on adopted sheets. All cases of one entry run in one test |
 | `dedupe:static` / `dedupe:post` / `dedupe:paint` (tests/styles-dedupe.spec.ts, 0.3.0) | `?dedupe=link` in full, trimmed and minified mode: see "Style de-duplication" |
 | `app --mod-* override` (tests/styles-late.spec.ts) | an application stylesheet sets `--mod-actionbutton-*` on `sp-action-button`: without the client and hydrated, trimmed and minified equal full |
 | `without constructable stylesheets` (tests/styles-late.spec.ts) | only the client's feature test fails (Lit and `<sp-theme>` keep adopting): held and hydrated button / tabs pages, trimmed and minified equal full |

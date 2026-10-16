@@ -8,8 +8,7 @@
  * - L3: adapters got `pass: 1 | 2` (also in pass 3) and `id: -1` without any way to identify the element in
  *   `prepare()` of pre-instantiated elements; they now get the real pass, the key and the previous pass's id.
  * - L4: pre-instantiation de-duplicated with `Array.includes` (quadratic in the number of elements).
- * - L5: structure changes components make on rendered nodes (e.g. `sp-table` inserting checkbox cells) were
- *   dropped silently; they are now reported.
+ * - L5: unhandled structure changes components make on rendered nodes were dropped silently; they are now reported.
  */
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
