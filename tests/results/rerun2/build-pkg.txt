@@ -1,4 +1,0 @@
-
-> spectrum-ssr-workspace@0.0.0 build:pkg
-> tsc -p packages/swc-ssr/tsconfig.build.json
-

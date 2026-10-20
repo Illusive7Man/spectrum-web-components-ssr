@@ -17,3 +17,4 @@ tests/results/summary.partial.md
 packages/swc-ssr/package.json.orig
 *.tgz
 .idea
+/tests/results/rerun*/

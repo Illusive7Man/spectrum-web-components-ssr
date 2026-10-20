@@ -7,7 +7,7 @@ The order of events (Discussion first, then this comment, then an issue or PR) i
 
 ## Before posting
 
-- [ ] The repository is public and `<REPO_URL>` below is its address.
+- [ ] The repository is public and `https://github.com/Illusive7Man/spectrum-web-components-ssr` is its address.
 - [ ] `npx playwright test` was run on the commit you link to and the numbers below equal its `tests/results/summary.md`
       (they are from the run of 2026-10-15; re-check them after any later change).
 - [ ] The GitHub Discussion is open and `<DISCUSSION_URL>` is filled in, or the sentence that mentions it is deleted.
@@ -20,7 +20,7 @@ The order of events (Discussion first, then this comment, then an issue or PR) i
 > I built server-side rendering and hydration for the 1st-gen components (`@spectrum-web-components/*` 1.12.4) as a
 > plugin for `@lit-labs/ssr` 4.1.0. It does not change any Spectrum Web Components source and does not patch
 > `node_modules`: it uses Lit SSR's `elementRenderers` and `renderOptions`, extends the DOM shim, and adds per-tag
-> adapters. Repository: <REPO_URL>. Details and the full matrix: <DISCUSSION_URL>.
+> adapters. Repository: https://github.com/Illusive7Man/spectrum-web-components-ssr. Details and the full matrix: <DISCUSSION_URL>.
 >
 > **Approach.** `@lit-labs/ssr` renders an element before its light DOM exists, while many components read light DOM,
 > slots and their own shadow content during `render()`. The plugin renders twice: pass 1 collects the element tree,
@@ -32,7 +32,7 @@ The order of events (Discussion first, then this comment, then an issue or PR) i
 >
 > **Measured** (Playwright, Chromium; 59 catalog entries, one showcase per component):
 >
-> - 55 of 59 entries are fully green.
+> - 56 of 59 entries are fully green.
 > - SSR markup 59/59, hydration without console errors 59/59, no visible flicker (under 0.2 % changed pixels, layout
 >   shift under 0.01) 58/59, post-hydration DOM equal to a client render 56/59, interaction smoke tests 20/20.
 > - A page with all entries (1,378 custom elements), the template-free hydration path, a German-localized page and three

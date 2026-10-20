@@ -8,13 +8,13 @@
   "author": "Savo Pejović",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/REPLACE_WITH_OWNER/spectrum-web-components-ssr.git",
+    "url": "git+https://github.com/Illusive7Man/spectrum-web-components-ssr.git",
     "directory": "packages/swc-ssr"
   },
   "bugs": {
-    "url": "https://github.com/REPLACE_WITH_OWNER/spectrum-web-components-ssr/issues"
+    "url": "https://github.com/Illusive7Man/spectrum-web-components-ssr/issues"
   },
-  "homepage": "https://github.com/REPLACE_WITH_OWNER/spectrum-web-components-ssr/tree/main/packages/swc-ssr#readme",
+  "homepage": "https://github.com/Illusive7Man/spectrum-web-components-ssr/tree/main/packages/swc-ssr#readme",
   "keywords": [
     "spectrum",
     "spectrum-web-components",

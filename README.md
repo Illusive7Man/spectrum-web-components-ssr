@@ -1,11 +1,11 @@
-# Spectrum SSR
+# Spectrum Web Components SSR
 
 Server-side rendering and hydration for [Adobe Spectrum Web Components](https://github.com/adobe/spectrum-web-components)
 (1st-gen, `@spectrum-web-components/*` 1.12.4), built as a plugin for [`@lit-labs/ssr`](https://lit.dev/docs/ssr/overview/) 4.1.0.
 No Spectrum source is modified: everything is done through the Lit SSR extension points, a DOM-shim extension and
 runtime adapters.
 
-Status (2026-10-16, 0.3.0): 55 of 59 catalog entries render, hydrate without errors and without flicker, and match the
+Status (2026-10-16, 0.3.0): 56 of 59 catalog entries render, hydrate without errors and without flicker, and match the
 client-rendered DOM (`tests/results/summary.md`); the whole-catalog page, the framework-agnostic path, a localized page
 and the phone checks (picker, action menu, contextual help at 390x844) are green. Memory is flat across renders
 (111-114 MB heap for repeated full-catalog renders).
