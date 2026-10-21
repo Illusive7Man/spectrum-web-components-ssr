@@ -23,10 +23,11 @@ npm install lit@3.3.3 lit-html@3.3.3 lit-element@4.2.2 @lit-labs/ssr@4.1.0 @lit-
 npm install @spectrum-web-components/bundle@1.12.4
 ```
 
-`lit`, `lit-html`, `lit-element` and the three `@lit-labs` packages are peer dependencies, which is why the second line
-names them: your application and this package must share one copy of each (a second copy of `lit-html` breaks
-hydration), and npm does not install peers on its own. The versions are the ones this package is developed and tested
-against. Name `@lit-labs/ssr` explicitly: the peer range is `~4.1.0` (4.1.x patch releases only) because the renderers
+`lit`, `lit-html`, `lit-element` and the three `@lit-labs` packages are peer dependencies: your application and this
+package must share one copy of each (a second copy of `lit-html` breaks hydration). npm 7 and newer install missing
+peers on their own (Yarn does not, and `--legacy-peer-deps` turns it off), but they take the newest version each peer
+range allows, so the second line pins the versions this package is developed and tested against.
+Name `@lit-labs/ssr` explicitly: the peer range is `~4.1.0` (4.1.x patch releases only) because the renderers
 rely on internals of 4.1.0 - the marker of an element binding passed to renderers as a static attribute, the way
 `customElementHostStack` is pushed and popped around `renderShadow()`, and `lib/render.js` `renderThunked` - which a
 minor release may change; a bare `npm install @lit-labs/ssr` would take whatever is latest. `@spectrum-web-components/base`
@@ -85,7 +86,7 @@ element registry are process-wide.
 | `debug` | `false` | keep the `data-swc-ssr` markers and log details. |
 | `styles` | `{mode: 'full'}` | the CSS of the declarative shadow roots. `{mode: 'trimmed'}` keeps only what the rendered page can use; see [Smaller pages](#smaller-pages-trimmed-css). Trimmed pages require `spectrum-web-components-ssr/client`. `{dedupe: 'link'}` (any mode) links one copy of each stylesheet instead of repeating it; see [One copy per stylesheet](#one-copy-per-stylesheet-dedupe-link). |
 
-### Smaller pages: trimmed CSS
+### Smaller pages: trimmed CSS (optional)
 
 In the default `full` mode every shadow root carries its element's complete stylesheets: about 95 % of the HTML of a
 Spectrum page is CSS. `styles: {mode: 'trimmed'}` keeps, per stylesheet, the rules whose selectors can match the
@@ -173,7 +174,9 @@ app.get('/', async (_req, res) => {
 
 It is off by default because browsers differ: Chromium waits in the parser for a shadow root's pending stylesheet link
 and never paints unstyled content (a cold load renders progressively and finishes once the sheets arrived); Firefox
-paints the content first and styles it when the sheet arrives - for a few frames even from a warm cache. The store is
+paints the content first and styles it when the sheet arrives: for the whole download on a cold load, and for a few
+frames (1-11, about 20-200 ms, Firefox 158) when the sheets come from the disk cache, i.e. in a new tab or a new browser
+session; only a same-tab reload, served from memory, shows no unstyled frame. The store is
 per process and bounded (32 MiB LRU; a text a render linked is kept for at least 60 s, `minLifetimeMs`): with several
 server instances, write the texts to shared storage through `dedupeUrl` (a `dedupeUrl` that throws keeps that text
 inline and reports it). Minified theme sheets, sheets under 160 bytes and sheets with relative URLs (`url()`,
@@ -305,17 +308,28 @@ request meets them:
 "spectrum-web-components-ssr": "^0.3.1"
 ```
 
-**`angular.json`.** The application build gets a server entry and the Express entry. `@lit-labs/ssr-dom-shim` stays
-external so that both server bundles (see below) share the one copy in `node_modules`; the package itself is bundled
-into the application's server bundle, so it patches the same Lit classes the application's elements are built on.
+**`angular.json`.** The application build gets a server entry (`main.server.ts`) and the Express entry (`server.ts`).
+`@lit-labs/ssr-dom-shim` is external in the development configuration only: the dev server loads the two server bundles
+(next point) separately, and the external makes both use the one copy in `node_modules`. The production build bundles
+it like everything else, because the deployed output has no `node_modules`; there the two bundles share it as one
+chunk. The package itself is always bundled into the application's server bundle, so it patches the same Lit classes
+the application's elements are built on.
 
 ```json
-"server": "src/main.server.ts",
-"outputMode": "server",
-"ssr": {"entry": "src/server.ts"},
-"polyfills": ["@angular/localize/init"],
-"externalDependencies": ["@lit-labs/ssr-dom-shim"]
+"options": {
+  "server": "src/main.server.ts",
+  "outputMode": "server",
+  "ssr": {"entry": "src/server.ts"},
+  "polyfills": ["@angular/localize/init"]
+},
+"configurations": {
+  "development": {"externalDependencies": ["@lit-labs/ssr-dom-shim"]}
+}
 ```
+
+**`tsconfig`.** The server entries use top-level `await`, so `tsconfig.json` needs `"module"` and `"target"` of
+`"ES2022"` or later; `tsconfig.app.json` lists `src/main.server.ts` and `src/server.ts` in `files` and has `"node"` in
+`types`.
 
 **Two bundles, one handover.** `@angular/ssr` builds `server.mjs` (the Express entry) and `main.server.mjs` (the
 application) as separate bundles; the dev server loads both through its own module runner. The Spectrum renderer must

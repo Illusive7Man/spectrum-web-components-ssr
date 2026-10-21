@@ -484,9 +484,10 @@ Trade-off (measured, docs/DESIGN.md "Style de-duplication"): **Chromium** waits 
 `<link rel="stylesheet">`, as at an in-body one: it never painted content without its CSS (0 unstyled frames on
 button and catalog, local to slow 3G, cold and warm cache, with and without hints and client), but a cold load renders
 progressively and its DOMContentLoaded waits for the sheets that are not cached yet (trimmed button page, 150 ms
-round trip: 178 ms inline, 493 ms linked cold, 187 ms warm). **Firefox** (157) does not wait: it paints content
-without its sheet until the sheet arrives - for the whole download on a cold load, and for 2-9 frames even from a
-warm cache - and CSS transitions then run from the unstyled values (an `sp-button` is a transparent 45x18 px block,
+round trip: 178 ms inline, 493 ms linked cold, 187 ms warm). **Firefox** (157, 158) does not wait: it paints content
+without its sheet until the sheet arrives - for the whole download on a cold load, and for 1-11 frames (about 20-200 ms)
+when the sheets come from the disk cache (a new tab, a new browser session); only a same-tab reload, served from memory,
+shows no unstyled frame - and CSS transitions then run from the unstyled values (an `sp-button` is a transparent 45x18 px block,
 then fades in its background). WebKit was not measured. That is why `dedupe` is off by default. It pays where the same
 sheets repeat across pages and the cache is warm (`full` + `'link'`: 94 % of the CSS of the 59 catalog pages is
 shared; trimmed 14 %, minified 2 %, since their texts are page-specific) and in browsers that wait for the link. With

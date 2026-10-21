@@ -1066,7 +1066,15 @@ the CSS delayed 300 ms, cold and warm; Firefox 7 / 7 locally and 47 / 5 delayed,
 | Firefox 157 (system install, WebDriver BiDi) | button, warm cache | 2-9 |
 | | button, cold, CSS delayed 300 ms / 1 s | 28-47 / 76-126 |
 | | catalog, warm / cold | 4-8 / 15-43 |
+| Firefox 158 (system install, WebDriver BiDi; `.probe/dedupe/first-paint-stock.ts`: only frames at or after `first-contentful-paint`, i.e. frames that were painted) | button: cold / same-tab reload / new tab / new session (disk cache) | 4 / 0 / 3 / 11 |
+| | button, CSS delayed 300 ms: cold / reload / new tab / disk | 42 / 0 / 3 / 20 |
+| | catalog: cold / reload / new tab / disk | 7 / 0 / 1 / 2 (CSS delayed 300 ms: 67 / 0 / 2 / 2) |
+| | Chromium 156 in the same harness and runs | 0 |
 | WebKit | - | not measured (Playwright 1.64 needs a WebKit build that is not installed) |
+
+The Firefox 158 run (2026-10-21) separates the caches: a same-tab reload serves the sheets from memory and paints no
+unstyled frame, which is what a quick visual check sees; a new tab or a new browser session takes them from the disk
+cache and still paints 1-11 unstyled frames (about 20-200 ms), a cold load the whole download.
 
 Chromium's parser waits at a pending shadow-root `<link rel="stylesheet">` like at an in-body one (traced with every
 sheet delayed by 1 s: the body held 2 elements until the theme sheet arrived at 1093 ms, first paint at 1120 ms), so it never paints content without its CSS; the price is

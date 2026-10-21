@@ -4,6 +4,17 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 Until 1.0.0 a minor version may contain breaking changes.
 
+## [Unreleased]
+
+### Changed
+
+- Documentation: the install notes no longer claim that npm leaves peer dependencies to you (npm 7 and newer install
+  them; the pinned versions are the tested ones), and the Firefox note for `dedupe: 'link'` carries the Firefox 158
+  measurement: unstyled frames on cold loads and when the sheets come from the disk cache (new tab, new session),
+  none on a same-tab reload (docs/DESIGN.md "Style de-duplication").
+- Documentation, Angular SSR: `@lit-labs/ssr-dom-shim` is external in the development configuration only (the production
+  build bundles it; the deployed output has no `node_modules`), plus the `tsconfig` settings the server entries need.
+
 ## [0.3.1] - unreleased
 
 ### Added
