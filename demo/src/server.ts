@@ -627,10 +627,15 @@ if (!existsSync(path.join(distDir, 'client.js'))) {
   console.warn('[demo] demo/public/dist/client.js is missing - run "npm run build:client" (or "npm run demo"); pages will not hydrate.');
 }
 
-const server = app.listen(port, () => {
-  console.log(`[demo] Spectrum SSR demo (${catalog.length} components) on http://localhost:${port}/`);
-});
-server.on('error', (error: NodeJS.ErrnoException) => {
-  console.error(`[demo] cannot listen on port ${port}: ${error.message}`);
-  process.exit(1);
-});
+// On Vercel the app is the default export of the root server.mjs (a Vercel Function calls it); the port is ours otherwise.
+if (!process.env.VERCEL) {
+  const server = app.listen(port, () => {
+    console.log(`[demo] Spectrum SSR demo (${catalog.length} components) on http://localhost:${port}/`);
+  });
+  server.on('error', (error: NodeJS.ErrnoException) => {
+    console.error(`[demo] cannot listen on port ${port}: ${error.message}`);
+    process.exit(1);
+  });
+}
+
+export default app;

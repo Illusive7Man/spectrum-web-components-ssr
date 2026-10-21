@@ -22,7 +22,8 @@
     "clean:pkg": "node -e \"require('node:fs').rmSync('packages/swc-ssr/dist',{recursive:true,force:true})\"",
     "pkg:prepare": "node scripts/prepare-publish.mjs",
     "pkg:restore": "node scripts/prepare-publish.mjs --restore",
-    "pkg:verify": "node scripts/verify-package.mjs"
+    "pkg:verify": "node scripts/verify-package.mjs",
+    "build:vercel": "node scripts/build-vercel.mjs"
   },
   "dependencies": {
     "@lit-labs/ssr": "4.1.0",

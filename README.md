@@ -1,5 +1,8 @@
 # Spectrum Web Components SSR
 
+[![Live demo](https://img.shields.io/badge/live%20demo-spectrum--web--components--ssr.vercel.app-000?logo=vercel)](https://spectrum-web-components-ssr.vercel.app/)
+[![npm](https://img.shields.io/npm/v/spectrum-web-components-ssr?label=npm)](https://www.npmjs.com/package/spectrum-web-components-ssr)
+
 Server-side rendering and hydration for [Adobe Spectrum Web Components](https://github.com/adobe/spectrum-web-components)
 (1st-gen, `@spectrum-web-components/*` 1.12.4), built as a plugin for [`@lit-labs/ssr`](https://lit.dev/docs/ssr/overview/) 4.1.0.
 No Spectrum source is modified: everything is done through the Lit SSR extension points, a DOM-shim extension and

@@ -18,3 +18,6 @@ packages/swc-ssr/package.json.orig
 *.tgz
 .idea
 /tests/results/rerun*/
+/public/
+/.vercel-server/
+.vercel/
