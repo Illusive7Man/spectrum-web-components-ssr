@@ -4,7 +4,7 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 Until 1.0.0 a minor version may contain breaking changes.
 
-## [Unreleased]
+## [0.3.3] - 2026-10-23
 
 ### Changed
 
@@ -12,10 +12,13 @@ Until 1.0.0 a minor version may contain breaking changes.
   them; the pinned versions are the tested ones), and the Firefox note for `dedupe: 'link'` carries the Firefox 158
   measurement: unstyled frames on cold loads and when the sheets come from the disk cache (new tab, new session),
   none on a same-tab reload (docs/DESIGN.md "Style de-duplication").
+- Documentation: the README is rewritten around the simplest examples first (server render, browser hydration, an Express
+  page), without version history; CSS trimming, linked stylesheets and short custom-property names moved to the end
+  as optional steps.
 - Documentation, Angular SSR: `@lit-labs/ssr-dom-shim` is external in the development configuration only (the production
   build bundles it; the deployed output has no `node_modules`), plus the `tsconfig` settings the server entries need.
 
-## [0.3.1] - unreleased
+## [0.3.1] - 2026-10-20
 
 ### Added
 
