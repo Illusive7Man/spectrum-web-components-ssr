@@ -14,7 +14,8 @@ tests/results/raw.partial-*.jsonl
 tests/results/summary.partial.md
 .probe/
 .pack-check/
-packages/swc-ssr/package.json.orig
+.pack-check-src/
+packages/spectrum-web-components-ssr/package.json.orig
 *.tgz
 .idea
 /tests/results/rerun*/

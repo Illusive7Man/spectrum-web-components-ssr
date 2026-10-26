@@ -1,5 +1,5 @@
 /**
- * swc-ssr/client's handling of the server's `<style>`s (`src/client/server-styles.ts`) on fakes, without a browser
+ * spectrum-web-components-ssr/client's handling of the server's `<style>`s (`src/client/server-styles.ts`) on fakes, without a browser
  * (Node has no `ShadowRoot`: the module takes its path for browsers without constructable stylesheets).
  *  - L3 (0.2.1): on a page without marked `<style>`s, an unmarked server `<style>` counts as partial only when its text
  *    is not the class's `elementStyles` text. That comparison used to concatenate and compare the complete CSS of

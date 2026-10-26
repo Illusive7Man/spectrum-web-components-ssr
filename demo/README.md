@@ -1,7 +1,7 @@
-# swc-ssr demo
+# Demo
 
-An Express app that server-side renders Spectrum Web Components with `swc-ssr/server`, and a browser entry that
-hydrates the result with `swc-ssr/client`. One showcase per component package lives in `src/catalog/`.
+An Express app that server-side renders Spectrum Web Components with `spectrum-web-components-ssr/server`, and a browser entry that
+hydrates the result with `spectrum-web-components-ssr/client`. One showcase per component package lives in `src/catalog/`.
 
 ## Run
 
@@ -64,8 +64,8 @@ catalog entry so that an entry's elements are defined in one task and in order.
 
 ## How hydration works
 
-`src/client.ts` imports `swc-ssr/client` first (its only static import) and loads the application with `import()`.
-`swc-ssr/client` installs Lit's hydration support, which has to exist before Lit creates `LitElement`; afterwards every
+`src/client.ts` imports `spectrum-web-components-ssr/client` first (its only static import) and loads the application with `import()`.
+`spectrum-web-components-ssr/client` installs Lit's hydration support, which has to exist before Lit creates `LitElement`; afterwards every
 Lit element honours `defer-hydration` and adopts its declarative shadow root instead of rendering a new one. It also
 hooks into each element's first update, where per-component hydration adapters restore the state the server rendered
 with (the selected item of `sp-picker`, for example).
@@ -105,7 +105,7 @@ const report = await page.evaluate(() => window.__swcSsrHydration);
 | `src/server.ts` | the Express app and the routes above |
 | `src/styles-routes.ts` | `?dedupe=` parsing and `GET /swc-css/<hash>.css` |
 | `src/page.ts` | `pageTemplate(entries)` and the shell's layout CSS |
-| `src/client.ts` | browser entry: imports `swc-ssr/client`, sets the test hooks, loads `client-app.ts` |
+| `src/client.ts` | browser entry: imports `spectrum-web-components-ssr/client`, sets the test hooks, loads `client-app.ts` |
 | `src/client-app.ts` | the application: loads the page's entries, hydrates or renders |
 | `src/catalog/` | one showcase module per component package; `index.ts` exports `catalog` and `findEntry` |
 | `build.mjs` | esbuild: the code-split, minified client bundle in `public/dist/` |

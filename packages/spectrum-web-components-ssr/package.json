@@ -1,6 +1,7 @@
 {
   "name": "spectrum-web-components-ssr",
-  "version": "0.3.2",
+  "version": "0.3.3",
+  "private": true,
   "type": "module",
   "description": "Server-side rendering + hydration support for Adobe Spectrum Web Components (1st-gen) as a plugin for @lit-labs/ssr. No changes to Spectrum sources.",
   "license": "Apache-2.0",
@@ -8,12 +9,12 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Illusive7Man/spectrum-web-components-ssr.git",
-    "directory": "packages/swc-ssr"
+    "directory": "packages/spectrum-web-components-ssr"
   },
   "bugs": {
     "url": "https://github.com/Illusive7Man/spectrum-web-components-ssr/issues"
   },
-  "homepage": "https://github.com/Illusive7Man/spectrum-web-components-ssr/tree/main/packages/swc-ssr#readme",
+  "homepage": "https://github.com/Illusive7Man/spectrum-web-components-ssr/tree/main/packages/spectrum-web-components-ssr#readme",
   "keywords": [
     "spectrum",
     "spectrum-web-components",
@@ -44,18 +45,9 @@
     "./dist/server/**"
   ],
   "exports": {
-    "./server": {
-      "types": "./dist/server/index.d.ts",
-      "default": "./dist/server/index.js"
-    },
-    "./client": {
-      "types": "./dist/client/index.d.ts",
-      "default": "./dist/client/index.js"
-    },
-    "./dom-shim": {
-      "types": "./dist/dom-shim/index.d.ts",
-      "default": "./dist/dom-shim/index.js"
-    },
+    "./server": "./src/server/index.ts",
+    "./client": "./src/client/index.ts",
+    "./dom-shim": "./src/dom-shim/index.ts",
     "./package.json": "./package.json"
   },
   "publishConfig": {

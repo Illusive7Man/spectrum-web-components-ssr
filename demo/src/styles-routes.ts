@@ -20,8 +20,8 @@
 import {brotliCompressSync, constants as zlibConstants, gzipSync} from 'node:zlib';
 import express from 'express';
 import type {Request, Response, Router} from 'express';
-import {DEFAULT_STYLE_SHEET_PATH, getStyleSheet, styleHeadOf} from 'swc-ssr/server';
-import type {RenderReport, StyleHeadHint} from 'swc-ssr/server';
+import {DEFAULT_STYLE_SHEET_PATH, getStyleSheet, styleHeadOf} from 'spectrum-web-components-ssr/server';
+import type {RenderReport, StyleHeadHint} from 'spectrum-web-components-ssr/server';
 
 /** URL path prefix the default `StyleOptions.dedupeUrl` writes (`/swc-css/`). */
 export const STYLE_SHEET_PATH = DEFAULT_STYLE_SHEET_PATH;

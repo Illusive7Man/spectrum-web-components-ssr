@@ -7,7 +7,7 @@
  * The server assumes there is room for the items instead: the last `max-visible-items` (default 4) items are
  * visible and only the rest goes into the menu - the same result `adjustOverflow()` computes in a browser whenever
  * the bar is wide enough. The browser recomputes from real widths after hydration (slotchange / ResizeObserver).
- * The client counterpart (`swc-ssr/client`, hooks.ts) restores this state before hydrating.
+ * The client counterpart (`spectrum-web-components-ssr/client`, hooks.ts) restores this state before hydrating.
  */
 import type {ElementAdapter} from '../types.js';
 

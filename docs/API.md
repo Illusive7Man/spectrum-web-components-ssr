@@ -1,6 +1,6 @@
 # API contract (binding for all implementation work)
 
-## `swc-ssr/dom-shim`  (`packages/swc-ssr/src/dom-shim/index.ts`)
+## `spectrum-web-components-ssr/dom-shim`  (`packages/spectrum-web-components-ssr/src/dom-shim/index.ts`)
 
 ```ts
 export function installSpectrumDomShim(): void;   // idempotent; installs @lit-labs/ssr global dom shim + Spectrum extras
@@ -52,7 +52,7 @@ default `cacheResults: true` returning stale results through the shared cache: `
 `p.setAttribute('class', 'on')`, and a component that queried after its sibling marked an ancestor rendered other
 markup than the browser. Fixed before release; the render time is unaffected.)
 
-## `swc-ssr/server`  (`packages/swc-ssr/src/server/index.ts`)
+## `spectrum-web-components-ssr/server`  (`packages/spectrum-web-components-ssr/src/server/index.ts`)
 
 ```ts
 import type {TemplateResult} from 'lit';
@@ -89,9 +89,9 @@ export interface RenderSpectrumOptions {
                                      // it, a whole-document template's own <html lang> is used from pass 2 on
   deterministicIds?: boolean;        // default true: randomID() ids are deterministic per render; false: this
                                      // render's randomID() calls use the CSPRNG too (process-wide switch:
-                                     // configureRandomSource from swc-ssr/dom-shim; see the caveat above)
+                                     // configureRandomSource from spectrum-web-components-ssr/dom-shim; see the caveat above)
   styles?: StyleOptions;             // the CSS of the declarative shadow roots; default {mode: 'full'} (byte-identical
-                                     // to 0.1.x). {mode: 'trimmed'} needs swc-ssr/client on the page: see "Styles" below
+                                     // to 0.1.x). {mode: 'trimmed'} needs spectrum-web-components-ssr/client on the page: see "Styles" below
 }
 
 export interface ElementReport {
@@ -204,7 +204,7 @@ export function styleHeadOf(styles: StylesReport | undefined, hint?: StyleHeadHi
                                                             // <link rel="stylesheet" media="not all">
 ```
 
-Built-in adapters (`packages/swc-ssr/src/server/adapters/`): `sp-theme` (lifecycle `none`), `sp-overlay` (kept closed,
+Built-in adapters (`packages/spectrum-web-components-ssr/src/server/adapters/`): `sp-theme` (lifecycle `none`), `sp-overlay` (kept closed,
 `prepare`), `sp-picker` (selection safety net), `sp-breadcrumbs` / `sp-split-view` / `sp-color-wheel` (layout-dependent
 state computed without layout, `prepare`), and `sp-table` (fully rendered selection cells inserted into the final light
 DOM). An internal inspector (`adapters/language.ts`) runs over the final pass's elements and warns about elements whose
@@ -475,7 +475,7 @@ without JavaScript except the HTTP cache, so with `'link'`:
   several instances, write the texts to shared storage from `dedupeUrl` (it receives every text) and serve them from
   there. A `dedupeUrl` that throws for a text keeps that text inline (trimmed) and adds a `#render` warning
   `StyleOptions.dedupeUrl threw for stylesheet <hash> ...`; the rest of the page is linked as usual;
-* `swc-ssr/client` treats a server `<link data-swc-styles>` like a marked `<style>` (restored, removed, minified ones
+* `spectrum-web-components-ssr/client` treats a server `<link data-swc-styles>` like a marked `<style>` (restored, removed, minified ones
   kept until settled, counted for the theme bridge); a theme `<link>` is never bridged (only minified theme sheets need
   the bridge, and those stay inline), and `'complete'` does not count for the theme-pending warning. Without
   constructable stylesheets a `<style>` with the complete text takes the first link's place.
@@ -496,15 +496,15 @@ compression on the wire the inline page is already small (brotli's window spans 
 `scanCustomPropertyReferences(text)` returns every custom-property name used through `var()` in a CSS or JavaScript
 text, fallbacks included, in order of first appearance: `references: scanCustomPropertyReferences(appCss)`.
 
-**Hydration: trimmed and minified pages REQUIRE `swc-ssr/client`.** Lit's hydration support
+**Hydration: trimmed and minified pages REQUIRE `spectrum-web-components-ssr/client`.** Lit's hydration support
 (`@lit-labs/ssr-client/lit-element-hydrate-support.js`) returns the declarative shadow root from `createRenderRoot()`
 and never calls `adoptStyles()`: a hydrated element keeps the server's `<style>` as its ONLY stylesheet
 (`adoptedStyleSheets` stays empty). `<sp-theme>` is the opposite: its constructor's `attachShadow()` clears the
-declarative shadow root and it adopts its complete theme fragments. Without `swc-ssr/client`, a trimmed page renders
+declarative shadow root and it adopts its complete theme fragments. Without `spectrum-web-components-ssr/client`, a trimmed page renders
 correctly until something changes (the app toggles `disabled`, a variant, `selected`, an overlay opens): those rules
 were trimmed away and stay missing. A minified page breaks the moment `<sp-theme>` upgrades: the components read
 renamed properties (`var(--a)`) that only the server's theme `<style>` defined (measured on the button page: 85,664
-differing pixels, the buttons lose their background and shrink from 32 to 22.8 px). `swc-ssr/client` therefore:
+differing pixels, the buttons lose their background and shrink from 32 to 22.8 px). `spectrum-web-components-ssr/client` therefore:
 
 * in every element's hydrating update (the template path, the agnostic path, and elements that hydrate on their own):
   when its server `<style>` carries `data-swc-styles` (or its text differs from the class's `elementStyles`, the
@@ -629,7 +629,7 @@ every response; docs/DESIGN.md "Performance" has every mode):
 | | trimmed + `dedupe: 'link'` | 1169.9 | 88.2 | 62.3 | 822.9 (138.8), 122 sheets | 201.1 | 62.3 |
 | | full + `dedupe: 'link'` | 1164.5 | 87.0 | 61.5 | 1170.0 (160.7), 101 sheets | 222.1 | 61.5 |
 
-`ServerTree` (internal, `packages/swc-ssr/src/server/server-tree.ts`): parse5 (htmlparser2 adapter) document of the pass-1
+`ServerTree` (internal, `packages/spectrum-web-components-ssr/src/server/server-tree.ts`): parse5 (htmlparser2 adapter) document of the pass-1
 HTML with lookup `byId(id)`, `lightChildren(id)`, `shadowRoot(id)`, `query(node, selector)`, `queryAll(node, selector)` via `css-select`,
 `documentLanguage()` (whole documents: the `<html lang>`), and `lightSignature(node)` (child tags with `slot`, text hash;
 used to verify adoptions and to locate light-DOM attribute changes). Since 0.3.0: `new ServerTree(html, {locations})`
@@ -637,7 +637,7 @@ records parse5 source locations (`hasLocations`; `sourceOffset(offset)` maps a p
 HTML across the replaced `<style>` bodies), and `contentHash` is the FNV-1a hash of the parsed text (the next pass's
 id seed, see "Deterministic ids").
 
-## `swc-ssr/client`  (`packages/swc-ssr/src/client/index.ts`)
+## `spectrum-web-components-ssr/client`  (`packages/spectrum-web-components-ssr/src/client/index.ts`)
 
 Must be the FIRST import of the client bundle (before `lit` and before any `@spectrum-web-components` import).
 
@@ -702,7 +702,7 @@ server-rendered selection cells), a `MatchMediaController` adapter for every hyd
 `Menu` adapter for every element built on `menu/src/Menu.js` that breaks the `updateCache()` / `getUpdateComplete()`
 cycle a menu hydrated more than a frame after its items were defined got stuck in, so `hydrateSpectrum()` may run any
 time after the definitions load, and, since 0.3.0, a measured-layout adapter for `sp-color-area` / `sp-color-wheel` and
-their subclasses, see below), importing `swc-ssr/client` installs two generic
+their subclasses, see below), importing `spectrum-web-components-ssr/client` installs two generic
 hooks on every Lit element whose pre-existing shadow root was rendered by `@lit-labs/ssr` (it contains a `<!--lit-part`
 marker) or whose tag starts with `sp-`: the initial `slotchange` (which declarative shadow roots never receive) is
 emulated like the server does, and a hydration mismatch is recovered from by re-rendering that element on the client
@@ -787,7 +787,7 @@ The demo renders with `renderSpectrum(pageTemplate(entries), {deferHydration: tr
 `styles <mode> <trimmed>/<full> KB` (with `?dedupe=link` also `, linked <n> sheets <KB> KB (<links> links)`).
 
 Page shell: `<!doctype html><html lang="<page language>"><head><meta charset="utf-8"><meta name="viewport" …><title>…</title><link rel="icon" href="data:,">[stylesheet hints with ?dedupe=link]<style>/* layout only */</style></head><body><div id="app">…</div><script type="module" src="/dist/client.js"></script></body></html>`.
-`/dist/client.js` is a 1.2 KB bootstrap (0.3.0): it imports `swc-ssr/client` (its static graph: `swc-ssr/client`, Lit's
+`/dist/client.js` is a 1.2 KB bootstrap (0.3.0): it imports `spectrum-web-components-ssr/client` (its static graph: `spectrum-web-components-ssr/client`, Lit's
 hydrate support, nothing of `lit-element` or Spectrum), sets `window.__swcSsrHydration`, `__swcSsrMode`,
 `__swcSsrReport` and `__swcSsrDefineLate` synchronously and loads the application (`client-app.ts`, which sets
 `__swcSsrDefined` and `__swcSsrRelease`) and the page's catalog entries from `/dist/chunks/*.js` with `import()`.

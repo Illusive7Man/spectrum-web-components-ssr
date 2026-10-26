@@ -1,4 +1,4 @@
-// MUST be the first statement of this module, and `swc-ssr/client` must be the first import of the client bundle.
+// MUST be the first statement of this module, and `spectrum-web-components-ssr/client` must be the first import of the client bundle.
 // It defines `globalThis.litElementHydrateSupport`, which `lit-element` reads once, when the LitElement class is
 // created. Anything that evaluates `lit` / `lit-element` / a Spectrum module before this line produces elements that
 // ignore the `defer-hydration` attribute and re-render their declarative shadow root from scratch (= flicker).

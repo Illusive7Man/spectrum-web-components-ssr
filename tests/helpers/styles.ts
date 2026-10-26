@@ -194,7 +194,7 @@ export interface ShadowStyles {
   byTag: Record<string, number>;
   /**
    * Hydrated `sp-*` Lit elements (upgraded, first update done, their class has `elementStyles`): after hydration of a
-   * trimmed / minified page each of them must run on adopted sheets (swc-ssr/client restores the complete ones).
+   * trimmed / minified page each of them must run on adopted sheets (spectrum-web-components-ssr/client restores the complete ones).
    */
   litElements: number;
   /** Of those, the ones whose shadow root has NO adopted style sheets, per tag. */
@@ -255,7 +255,7 @@ export function collectShadowStyles(): ShadowStyles {
 /**
  * Attributes set on every `sp-*` element of a hydrated section, group by group (`applyStates`). Trimmed server CSS
  * keeps `:host([selected])` only when an instance rendered `selected`: a hydrated trimmed page must still style the
- * states the page enters later, which is what swc-ssr/client's server-styles restore is for. The groups pair states
+ * states the page enters later, which is what spectrum-web-components-ssr/client's server-styles restore is for. The groups pair states
  * that do not hide each other (`disabled` goes last and alone: it dims most components).
  */
 export const STATE_GROUPS: ReadonlyArray<readonly string[]> = [

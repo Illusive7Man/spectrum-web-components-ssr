@@ -371,7 +371,7 @@ export function pendingTrimmedThemes(): number {
 
 /**
  * Keeps the server's marked `<sp-theme>` `<style>` alive while elements still depend on it (see the file comment).
- * Called when `swc-ssr/client` loads - before any element is defined, so before `<sp-theme>` upgrades and clears its
+ * Called when `spectrum-web-components-ssr/client` loads - before any element is defined, so before `<sp-theme>` upgrades and clears its
  * declarative shadow root. Themes in the light DOM and in open (declarative) shadow roots are bridged. Does nothing
  * when no theme has a marked `<style>` (`full` mode), or nothing else does. The same scan records whether the page has
  * trimmed server CSS at all (`trimmedPage`). The bridge is a plain `<style>`: browsers without constructable

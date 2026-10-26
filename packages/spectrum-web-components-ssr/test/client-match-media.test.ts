@@ -1,5 +1,5 @@
 /**
- * swc-ssr/client, M9: `MatchMediaController.matches` is pinned to the server's value for the hydrating update and
+ * spectrum-web-components-ssr/client, M9: `MatchMediaController.matches` is pinned to the server's value for the hydrating update and
  * restored afterwards with `requestUpdate()`. Uses Spectrum's real controller
  * (`reactive-controllers/src/MatchMedia.js`) with a fake host and a phone-like `window.matchMedia`.
  */

@@ -46,7 +46,7 @@ import {
  *   app --mod- override  an application stylesheet customises sp-action-button through Spectrum's public `--mod-*` hooks.
  *                     Without the client (`?nohydrate=1`) and hydrated, the trimmed and the minified page equal the full page
  *                     (the minifier renamed every `--mod-*` a kept rule defines, so the app's override was ignored).
- *   no constructable stylesheets  swc-ssr/client's own feature test (`'replaceSync' in CSSStyleSheet.prototype`) is made
+ *   no constructable stylesheets  spectrum-web-components-ssr/client's own feature test (`'replaceSync' in CSSStyleSheet.prototype`) is made
  *                     to fail while Lit and Spectrum keep working (`NO_CSSOM_INIT`), so the client takes its path for
  *                     browsers without constructable stylesheets (the server `<style>` gets the complete text). Held
  *                     before `hydrateSpectrum()` (`<sp-theme>` upgraded, nothing hydrated) and hydrated, the trimmed and
@@ -94,7 +94,7 @@ async function settled(page: Page, root: string): Promise<void> {
 // Late definitions
 // ---------------------------------------------------------------------------------------------
 
-/** The `HydrationReport.warnings` entry of swc-ssr/client for a theme that has not upgraded (prefix). */
+/** The `HydrationReport.warnings` entry of spectrum-web-components-ssr/client for a theme that has not upgraded (prefix). */
 const THEME_PENDING_WARNING = 'theme pending: sp-theme not defined; trimmed/minified theme values incomplete';
 
 interface ChildState {
@@ -459,11 +459,11 @@ if (selected(MOD_ENTRY)) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Without constructable stylesheets (as far as swc-ssr/client can tell)
+// Without constructable stylesheets (as far as spectrum-web-components-ssr/client can tell)
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Hides `CSSStyleSheet.prototype.replaceSync` from `in` (swc-ssr/client's feature test) while every sheet Lit creates
+ * Hides `CSSStyleSheet.prototype.replaceSync` from `in` (spectrum-web-components-ssr/client's feature test) while every sheet Lit creates
  * still has it (an own property): Lit's own test (`'replace' in CSSStyleSheet.prototype`) still passes, so Lit and
  * Spectrum's `<sp-theme>` (which has no fallback) keep adopting their sheets.
  */
@@ -489,7 +489,7 @@ interface NoCssomLoad {
   clips: Record<NoCssomView, Rect>;
   report: HydrationReportLike;
   errors: string[];
-  /** swc-ssr/client's feature test failed in the page (the case is meaningful). */
+  /** spectrum-web-components-ssr/client's feature test failed in the page (the case is meaningful). */
   hidden: boolean;
   styles: ShadowStyles;
 }

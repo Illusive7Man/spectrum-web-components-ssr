@@ -1,4 +1,4 @@
-# Proposing swc-ssr upstream
+# Proposing spectrum-web-components-ssr upstream
 
 How this project could be proposed to Adobe (Spectrum Web Components) and to Lit, in what order, and what has to change
 for each. Everything about the upstream repositories was read from their `main` branches on 2026-10-15 (sources are
@@ -98,7 +98,7 @@ Differences that matter:
 ## 3. Sequence
 
 0. **Prepare the standalone repository first** (nothing upstream depends on it, but every later step links to it):
-   fill in `REPLACE_WITH_OWNER` in `packages/swc-ssr/package.json`, run `npm run pkg:verify`, regenerate the matrix
+   fill in `REPLACE_WITH_OWNER` in `packages/spectrum-web-components-ssr/package.json`, run `npm run pkg:verify`, regenerate the matrix
    (`npx playwright test`), push the repository, publish `spectrum-web-components-ssr` (suggested name; it, `swc-ssr`
    and `@spectrum-web-components/ssr` were all unregistered on npm on 2026-10-15; `swc-ssr` is also easily mistaken for
    the Rust compiler SWC, and the `@spectrum-web-components` scope belongs to Adobe). Keep the "not affiliated with
@@ -149,13 +149,13 @@ guards there would remove the need for a global `window` for part of the surface
 
 | Here | Upstream | Notes |
 |---|---|---|
-| `packages/swc-ssr/src/server/**` | `1st-gen/tools/ssr/src/server/**` | add Adobe license headers, Prettier/ESLint pass |
-| `packages/swc-ssr/src/dom-shim/**` | `1st-gen/tools/ssr/src/dom-shim/**` | shrinks as Lit takes pieces (section 6) |
-| `packages/swc-ssr/src/client/**`, `src/shared/**` | `1st-gen/tools/ssr/src/client/**`, `src/shared/**` | |
-| `packages/swc-ssr/package.json` | `1st-gen/tools/ssr/package.json` | re-shaped as in section 2; drop `build:pkg` scripts and `scripts/` |
-| `packages/swc-ssr/README.md`, `CHANGELOG.md` | package README; changelog is generated from changesets | their changelog tooling replaces `CHANGELOG.md` |
+| `packages/spectrum-web-components-ssr/src/server/**` | `1st-gen/tools/ssr/src/server/**` | add Adobe license headers, Prettier/ESLint pass |
+| `packages/spectrum-web-components-ssr/src/dom-shim/**` | `1st-gen/tools/ssr/src/dom-shim/**` | shrinks as Lit takes pieces (section 6) |
+| `packages/spectrum-web-components-ssr/src/client/**`, `src/shared/**` | `1st-gen/tools/ssr/src/client/**`, `src/shared/**` | |
+| `packages/spectrum-web-components-ssr/package.json` | `1st-gen/tools/ssr/package.json` | re-shaped as in section 2; drop `build:pkg` scripts and `scripts/` |
+| `packages/spectrum-web-components-ssr/README.md`, `CHANGELOG.md` | package README; changelog is generated from changesets | their changelog tooling replaces `CHANGELOG.md` |
 | `docs/DESIGN.md`, `docs/API.md` | package README and a docs page | trim to what users need; keep DESIGN.md as the maintainer-facing document |
-| `packages/swc-ssr/test/*.test.ts` (Node, `tsx --test`) | `1st-gen/tools/ssr/test/` | **runner question**: web-test-runner is a browser runner and cannot run Node SSR tests. These need a Node test script next to it (`node --test`, wired into `yarn test:1st-gen`) or maintainers' preferred alternative |
+| `packages/spectrum-web-components-ssr/test/*.test.ts` (Node, `tsx --test`) | `1st-gen/tools/ssr/test/` | **runner question**: web-test-runner is a browser runner and cannot run Node SSR tests. These need a Node test script next to it (`node --test`, wired into `yarn test:1st-gen`) or maintainers' preferred alternative |
 | `tests/*.spec.ts`, `tests/helpers/**` (Playwright matrix) | `1st-gen/tools/ssr/test/e2e/` with its own Playwright config | they already use Playwright for a11y; the matrix needs a server, so a small fixture server |
 | `demo/` | stays out of the package | the catalog (one showcase per component) is the matrix' input and could become the fixture; the express app itself is a demo |
 | `tests/results/summary.md` | not committed upstream; produced in CI | linked from the PR instead |
@@ -182,7 +182,7 @@ first PR.
 
 ## 6. What belongs to Lit instead
 
-Generic pieces of `packages/swc-ssr/src/dom-shim/` that are not Spectrum-specific and could be offered to
+Generic pieces of `packages/spectrum-web-components-ssr/src/dom-shim/` that are not Spectrum-specific and could be offered to
 `@lit-labs/ssr-dom-shim` (`packages/labs/ssr-dom-shim` in lit/lit). The shim 1.6.0 exports `Event` and `CustomEvent`
 only, and no `Node` global.
 

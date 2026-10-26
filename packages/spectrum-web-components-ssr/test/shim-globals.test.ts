@@ -13,7 +13,7 @@ import {SERVER_MEDIA_MATCHES} from '../src/client/match-media.ts';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const g = globalThis as any;
-// @lit-labs/ssr's own global shim (imported by swc-ssr/dom-shim) defines `window: undefined`.
+// @lit-labs/ssr's own global shim (imported by spectrum-web-components-ssr/dom-shim) defines `window: undefined`.
 const windowBefore = g.window;
 
 installSpectrumDomShim();

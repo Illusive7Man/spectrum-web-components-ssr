@@ -54,7 +54,7 @@ export interface RenderSpectrumOptions {
    * `crypto.getRandomValues` request) come from a per-pass deterministic source, so the same page renders the same
    * ids in every pass and every render. `false`: this render's `randomID()` calls use the real CSPRNG too. Every
    * other `getRandomValues` request always uses the CSPRNG. Process-wide switch: `configureRandomSource()` from
-   * `swc-ssr/dom-shim`.
+   * `spectrum-web-components-ssr/dom-shim`.
    */
   deterministicIds?: boolean;
   /**
@@ -72,7 +72,7 @@ export interface RenderSpectrumOptions {
  * Every `<style>` whose text was trimmed or minified carries `data-swc-styles="trimmed"` / `"minified"`
  * (`STYLE_MARKER_ATTRIBUTE`). Lit's hydration support keeps a hydrated element's server `<style>` as its only CSS (it
  * adopts no `elementStyles` for a declarative shadow root), while `<sp-theme>` replaces its declarative shadow root on
- * upgrade with its complete theme fragments: `swc-ssr/client` uses the marker to give marked elements their complete
+ * upgrade with its complete theme fragments: `spectrum-web-components-ssr/client` uses the marker to give marked elements their complete
  * stylesheets back after hydration and to keep minified theme names defined until then. The trimmed CSS itself only
  * has to be right for the server-rendered state (first paint, no-JS views).
  */
@@ -114,7 +114,7 @@ export interface StyleOptions {
    * application sets or reads `--spectrum-*` itself without listing them in `references`. The changed `<style>`
    * elements carry `data-swc-styles="minified"`: an element that has not got its complete stylesheets back yet
    * depends on the renamed theme properties, which `<sp-theme>` drops when it upgrades on the client (it replaces its
-   * declarative shadow root); `swc-ssr/client` keeps them defined until every marked element is restored.
+   * declarative shadow root); `spectrum-web-components-ssr/client` keeps them defined until every marked element is restored.
    */
   minifyCustomProperties?: boolean;
   /** Selectors (substring of, or RegExp tested against, a rule's selector text) whose rules are always kept. */
@@ -123,7 +123,7 @@ export interface StyleOptions {
    * Default `'none'`: every shadow root carries its own `<style>` copy of its stylesheets. `'link'` (0.3.0): every
    * distinct stylesheet text (after trimming / minification; the complete texts in `full` mode) is stored once under a
    * content hash in `styleSheetStore` and every shadow root gets `<link rel="stylesheet" href="..."
-   * data-swc-styles="...">` instead (`swc-ssr/client` restores and removes them like a marked `<style>`). The
+   * data-swc-styles="...">` instead (`spectrum-web-components-ssr/client` restores and removes them like a marked `<style>`). The
    * application must serve the store (`getStyleSheet(hash)`, `text/css`, `Cache-Control: public, max-age=31536000,
    * immutable`) and put `RenderSpectrumResult.head` (preload hints) into its `<head>`. Stays inline: minified theme
    * stylesheets (the client's theme bridge moves them as `<style>` elements), sheets under 160 bytes, and sheets with a
@@ -207,7 +207,7 @@ export interface RenderSpectrumResult {
   /**
    * Markup for the page's `<head>` (0.3.0): with `StyleOptions.dedupe: 'link'`, a `<link rel="preload" as="style">`
    * per linked stylesheet URL, in order of first use; '' otherwise. Put it into `<head>`, before `<body>`, so that the
-   * downloads start before the parser reaches the shadow roots. `renderSpectrum` of `swc-ssr/server` always sets it
+   * downloads start before the parser reaches the shadow roots. `renderSpectrum` of `spectrum-web-components-ssr/server` always sets it
    * (optional in this type only because the render core builds results without it).
    */
   head?: string;

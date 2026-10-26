@@ -5,20 +5,20 @@
  * a declarative shadow root from another source - are left alone (lit's own hydration support applies to them).
  * Installed by chaining onto `globalThis.litElementHydrateSupport`, which
  * `@lit-labs/ssr-client/lit-element-hydrate-support.js` defines and `lit-element` calls once when `LitElement` is
- * created - so this module must be evaluated before `lit-element` (it is, through `swc-ssr/client`, which must be the
+ * created - so this module must be evaluated before `lit-element` (it is, through `spectrum-web-components-ssr/client`, which must be the
  * first import of the client bundle). It must not import `lit` / `lit-element` itself.
  *
  * 1. Hydration adapters (`registerHydrationAdapter`): per-tag code that runs right before the hydrating update
  *    (`beforeHydrate`, at the start of the first `performUpdate()`) and right after it (`afterHydrate`), to give the
  *    element the state the server rendered it with, so that its first client render matches the server markup (the
- *    counterpart of the server adapters in `swc-ssr/server`), and to hide server-rendered shadow content from code
+ *    counterpart of the server adapters in `spectrum-web-components-ssr/server`), and to hide server-rendered shadow content from code
  *    that does not expect any before the first render. Built in: see "Built-in adapters" below.
  * 2. The initial `slotchange`: for declarative shadow roots the browser assigns slots while parsing, long before the
  *    element is upgraded and its `@slotchange` listeners exist, so the `slotchange` a client-rendered element gets
  *    after its first render never reaches a hydrated one. Many Spectrum components finish their setup there
  *    (`tabs/src/Tabs.js` `onSlotChange` -> tab list, selection indicator, roving tabindex; `menu/src/MenuGroup.js`
  *    header id; `split-view/src/SplitView.js` `enoughChildren`; `swatch/src/SwatchGroup.js`, `sidenav`, `tags`, ...),
- *    and the server renders that state: `swc-ssr/server` invokes the `<slot @slotchange=${listener}>` listeners of
+ *    and the server renders that state: `spectrum-web-components-ssr/server` invokes the `<slot @slotchange=${listener}>` listeners of
  *    the first render result (and dispatches one event at the shadow root) before it renders the final markup. The
  *    client does the same: at the start of the first update the element's `render()` result is searched for
  *    `@slotchange` bindings, and each listener is called with a synthetic `slotchange` event targeting the matching
@@ -131,7 +131,7 @@ function reportListenerFailure(element: HTMLElement, error: unknown): void {
  * Calls the template `@slotchange` listeners like the browser delivers the initial events: every slot with assigned
  * nodes gets one (tree order), and it bubbles, so a listener bound to an ancestor slot hears it as well, with the
  * inner slot as `target` (`help-text/src/HelpTextManager.js` listens on an outer slot whose fallback content holds
- * the `help-text` slot that receives the nodes). Same as swc-ssr/server.
+ * the `help-text` slot that receives the nodes). Same as spectrum-web-components-ssr/server.
  */
 function invokeSlotchangeListeners(element: any, bindings: SlotchangeBinding[]): void {
   const root: ShadowRoot | null = element.shadowRoot;

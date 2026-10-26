@@ -806,7 +806,7 @@ function sheetGroupOf(entry: SheetEntry, ids: Map<unknown, string>): string {
  * `minifyCustomProperties`: renames custom properties of the trimmed stylesheets to short names, most used first,
  * consistently across all of them.
  *
- * A name is renamed only when the client can switch every use of it at once (`swc-ssr/client` restores an element's
+ * A name is renamed only when the client can switch every use of it at once (`spectrum-web-components-ssr/client` restores an element's
  * complete stylesheets - original names - in its hydrating update, element by element, and bridges the theme's
  * server `<style>` until no minified element is left):
  *  - every definition is in the theme (any reference): the bridged theme keeps the short name defined for elements

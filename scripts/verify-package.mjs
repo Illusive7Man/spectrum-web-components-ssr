@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 // Proves that what "npm publish" would upload actually works, without publishing anything:
 //
-//   1. builds packages/swc-ssr/dist (tsc -p packages/swc-ssr/tsconfig.build.json)
+//   1. builds packages/spectrum-web-components-ssr/dist (tsc -p packages/spectrum-web-components-ssr/tsconfig.build.json)
 //   2. switches package.json to its publish form (scripts/prepare-publish.mjs) and runs "npm pack" on it, then
 //      restores the workspace form right away
 //   3. checks the tarball's file list (dist, README, CHANGELOG, LICENSE in; src, tests, tsconfig out) and that every
 //      bare import in dist/ names a declared dependency / peer dependency
 //   4. unpacks the tarball into .pack-check/node_modules/<name>, like an installed package, and from there
 //        - renders a small Spectrum page through "<name>/server" + "<name>/dom-shim" in plain node, renders the same
-//          page from the workspace sources (node --import tsx, "swc-ssr/server") and requires identical output
+//          page from the workspace sources (node --import tsx, run from .pack-check-src/ so that the same name resolves
+//          to the workspace link in the repository's node_modules) and requires identical output
 //        - bundles "<name>/client" with esbuild for the browser
 //        - type-checks a consumer that imports the three entry points (the emitted .d.ts files)
 //   5. removes .pack-check, the tarball and (if it did not exist before) dist
@@ -23,10 +24,11 @@ import {builtinModules} from 'node:module';
 import {build} from 'esbuild';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const pkgDir = path.join(root, 'packages', 'swc-ssr');
+const pkgDir = path.join(root, 'packages', 'spectrum-web-components-ssr');
 const distDir = path.join(pkgDir, 'dist');
 const manifestBackup = path.join(pkgDir, 'package.json.orig');
 const work = path.join(root, '.pack-check');
+const workSrc = path.join(root, '.pack-check-src'); // the workspace-sources consumer must not see .pack-check/node_modules
 const PUBLISH_NAME = 'spectrum-web-components-ssr';
 const keepDist = process.argv.includes('--keep-dist');
 
@@ -65,9 +67,9 @@ const hadDist = existsSync(distDir);
 
 try {
   // 1. build
-  step('build (tsc -p packages/swc-ssr/tsconfig.build.json)');
+  step('build (tsc -p packages/spectrum-web-components-ssr/tsconfig.build.json)');
   rmSync(distDir, {recursive: true, force: true});
-  const tsc = node([path.join(root, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', 'packages/swc-ssr/tsconfig.build.json']);
+  const tsc = node([path.join(root, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', 'packages/spectrum-web-components-ssr/tsconfig.build.json']);
   if (tsc.status !== 0) throw new Error(`tsc failed:\n${tsc.stdout}${tsc.stderr}`);
   const distFiles = [...walk(distDir)];
   console.log(`dist: ${distFiles.length} files, ${(distFiles.reduce((sum, f) => sum + statSync(f).size, 0) / 1024).toFixed(0)} KiB`);
@@ -76,10 +78,12 @@ try {
   step('npm pack (publish manifest)');
   rmSync(work, {recursive: true, force: true});
   mkdirSync(work, {recursive: true});
-  const prepare = node(['scripts/prepare-publish.mjs', '--name', PUBLISH_NAME, '--allow-placeholders']);
+  rmSync(workSrc, {recursive: true, force: true});
+  mkdirSync(workSrc, {recursive: true});
+  const prepare = node(['scripts/prepare-publish.mjs', '--allow-placeholders']);
   if (prepare.status !== 0) throw new Error(`prepare-publish failed:\n${prepare.stdout}${prepare.stderr}`);
   const manifest = JSON.parse(readFileSync(path.join(pkgDir, 'package.json'), 'utf8'));
-  const pack = node([npmCli(), 'pack', './packages/swc-ssr', '--json', '--pack-destination', work]);
+  const pack = node([npmCli(), 'pack', './packages/spectrum-web-components-ssr', '--json', '--pack-destination', work]);
   const restore = node(['scripts/prepare-publish.mjs', '--restore']);
   if (restore.status !== 0) throw new Error(`restore failed:\n${restore.stdout}${restore.stderr}`);
   if (pack.status !== 0) throw new Error(`npm pack failed:\n${pack.stdout}${pack.stderr}`);
@@ -147,7 +151,7 @@ process.stdout.write(JSON.stringify({
 }));
 `;
   writeFileSync(path.join(work, 'consumer-dist.mjs'), consumer(PUBLISH_NAME));
-  writeFileSync(path.join(work, 'consumer-src.mjs'), consumer('swc-ssr'));
+  writeFileSync(path.join(workSrc, 'consumer-src.mjs'), consumer(PUBLISH_NAME));
 
   const parse = (label, result) => {
     if (result.status !== 0) {
@@ -157,7 +161,7 @@ process.stdout.write(JSON.stringify({
     return JSON.parse(result.stdout);
   };
   const fromDist = parse('dist', node([path.join(work, 'consumer-dist.mjs')]));
-  const fromSrc = parse('src', node(['--import', 'tsx', path.join(work, 'consumer-src.mjs')]));
+  const fromSrc = parse('src', node(['--import', 'tsx', path.join(workSrc, 'consumer-src.mjs')]));
   if (fromDist && fromSrc) {
     console.log(`dist render: ${fromDist.html.length} bytes, ${fromDist.passes} passes, ${fromDist.errors.length} errors; src render: ${fromSrc.html.length} bytes`);
     if (fromDist.errors.length > 0) fail(`dist render reported errors: ${fromDist.errors.join(' | ')}`);
@@ -229,6 +233,7 @@ export const hydrated: Promise<HydrationReport> = hydrateSpectrum(document.body,
 } finally {
   if (existsSync(manifestBackup)) node(['scripts/prepare-publish.mjs', '--restore']);
   rmSync(work, {recursive: true, force: true});
+  rmSync(workSrc, {recursive: true, force: true});
   if (!hadDist && !keepDist) rmSync(distDir, {recursive: true, force: true});
 }
 

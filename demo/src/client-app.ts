@@ -1,5 +1,5 @@
-import {hydrateSpectrum, hydrationReport} from 'swc-ssr/client';
-import type {HydrateSpectrumOptions, HydrationReport} from 'swc-ssr/client';
+import {hydrateSpectrum, hydrationReport} from 'spectrum-web-components-ssr/client';
+import type {HydrateSpectrumOptions, HydrationReport} from 'spectrum-web-components-ssr/client';
 import {render} from 'lit';
 import {findEntry} from './catalog/index.js';
 import type {CatalogEntry} from './catalog/types.js';
@@ -7,7 +7,7 @@ import {pageTemplate} from './page.js';
 
 /**
  * The application part of the demo's browser code, loaded by demo/src/client.ts with a dynamic `import()` AFTER
- * `swc-ssr/client` has been evaluated: this module (and with it `lit` and, through the catalog, everything that
+ * `spectrum-web-components-ssr/client` has been evaluated: this module (and with it `lit` and, through the catalog, everything that
  * evaluates `lit-element`) must not be part of the static import graph of the entry. See the comment in client.ts.
  *
  * `#app` is rendered by demo/src/server.ts:

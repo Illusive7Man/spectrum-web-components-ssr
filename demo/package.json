@@ -1,9 +1,9 @@
 {
-  "name": "swc-ssr-demo",
+  "name": "spectrum-web-components-ssr-demo",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "dependencies": {
-    "swc-ssr": "*"
+    "spectrum-web-components-ssr": "*"
   }
 }

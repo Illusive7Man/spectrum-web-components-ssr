@@ -1,4 +1,4 @@
-# swc-ssr — SSR for Spectrum Web Components (1st-gen) as a plugin for @lit-labs/ssr
+# spectrum-web-components-ssr — SSR for Spectrum Web Components (1st-gen) as a plugin for @lit-labs/ssr
 
 Status: design contract for the implementation. All implementation work must follow this file.
 Target: `@spectrum-web-components/*` **1.12.4** (1st-gen). gen2 (`@adobe/spectrum-wc` 2.0.0-beta) is out of scope for now.
@@ -79,7 +79,7 @@ Hard constraint: **no edits to any `@spectrum-web-components/*` source**. Everyt
 
 ## Architecture: two-pass render on top of unmodified @lit-labs/ssr
 
-`renderSpectrum(template, options)` in `swc-ssr/server`:
+`renderSpectrum(template, options)` in `spectrum-web-components-ssr/server`:
 
 1. **Pass 1 ("collect")** - call upstream `render(template, {elementRenderers: [SpectrumElementRenderer, LitElementRenderer], deferHydration, ...})`
    with the renderer in collect mode. Each `SpectrumElementRenderer` instance gets a sequential id (construction order ==
@@ -123,7 +123,7 @@ the element's `system`/`color`/`scale` (plus `core`/`global` fragments) as `<sty
 - this is what the real Theme does with `adoptedStyleSheets`. It does not set `dir` (1.12's Theme does not either; an
 extra attribute would differ from the client-rendered DOM).
 
-### DOM shim extras (`swc-ssr/dom-shim`)
+### DOM shim extras (`spectrum-web-components-ssr/dom-shim`)
 
 `installSpectrumDomShim()` - idempotent; must run before any Spectrum import. Installs the globals listed above, plus
 `Element.prototype` defaults for the light-DOM API (return null / empty / '' when no tree is attached),
@@ -136,9 +136,9 @@ Everything via `??=` / `defineProperty` guarded by existence so newer `@lit-labs
 Must not break `lit`'s own SSR (`isServer` from `lit` must stay `true`; do not define browser-detection globals that flip
 Lit into browser mode - check `lit`'s `node` export conditions).
 
-### Client (`swc-ssr/client`)
+### Client (`spectrum-web-components-ssr/client`)
 
-* `swc-ssr/client` must be imported **before** `lit` and before any Spectrum module: it imports
+* `spectrum-web-components-ssr/client` must be imported **before** `lit` and before any Spectrum module: it imports
   `@lit-labs/ssr-client/lit-element-hydrate-support.js`, and the `@webcomponents/template-shadowroot` polyfill applied
   when `HTMLTemplateElement.prototype.shadowRootMode` is unsupported.
 * `hydrateSpectrum(root = document.body, {template?, data?})`: if a Lit template is given, calls `hydrate()` from
@@ -170,13 +170,13 @@ Lit into browser mode - check `lit`'s `node` export conditions).
 * `demo/build.mjs` - esbuild (0.3.0: minified, code-split ESM with content-hashed `dist/chunks/*`, source maps, `.br`
   (q11) / `.gz` (9) siblings for every script of 1 KB or more) of `demo/src/client.ts` -> `demo/public/dist/client.js`.
   See "Demo build" under "Performance".
-* `demo/src/client.ts` - a 1.2 KB bootstrap: imports `swc-ssr/client` first (its only static import), sets the test
+* `demo/src/client.ts` - a 1.2 KB bootstrap: imports `spectrum-web-components-ssr/client` first (its only static import), sets the test
   hooks, then loads `demo/src/client-app.ts` with `import()`, which loads the page's catalog entries (one
   registration chunk each) and hydrates with the same template + data as the server.
 * `demo/src/catalog/page-theme.ts` / `page-theme-register.ts` - the shell's `sp-theme` with its light / medium
   fragments, registered fragments first (see "Demo build").
 
-### Tests (`tests/`, Playwright; unit tests in `packages/swc-ssr/test` via `tsx --test`)
+### Tests (`tests/`, Playwright; unit tests in `packages/spectrum-web-components-ssr/test` via `tsx --test`)
 
 Per catalog component: (1) SSR HTML contains a declarative shadow root for every `sp-*` element in the section and no
 `data-swc-ssr` leftovers; (2) with JS disabled the page renders (screenshot saved); (3) hydration produces no console
@@ -221,7 +221,7 @@ The interaction smoke test clicks the first control that is visible, enabled and
 
 ## Integration findings (Oct 2026)
 
-Server (`swc-ssr/server`, all outside Spectrum sources):
+Server (`spectrum-web-components-ssr/server`, all outside Spectrum sources):
 
 * Render order: pass-2 elements connect and run their first update tree scope by tree scope (light DOM before the
   shadow content of its hosts, document order within a scope), the order client-side rendering creates them in.
@@ -281,7 +281,7 @@ Server (`swc-ssr/server`, all outside Spectrum sources):
   renderer's own writes are excluded (`withoutAttributeReactions` in `lifecycle.ts`): upstream's
   `ElementRenderer.setAttribute` notifies explicitly.
 
-Client (`swc-ssr/client`, `hooks.ts`): the first client render must match the server markup, which shows the settled
+Client (`spectrum-web-components-ssr/client`, `hooks.ts`): the first client render must match the server markup, which shows the settled
 state. The hooks apply to elements whose pre-existing shadow root was rendered by `@lit-labs/ssr` (contains a
 `<!--lit-part` marker) or whose tag starts with `sp-`; other Lit elements with a declarative shadow root are left to
 lit's own hydrate support. Hydration adapters restore server state before the hydrating update (`sp-picker` selected item,
@@ -329,7 +329,7 @@ where it starts (comments name the path):
    built. `TreeRealm.dispose()` stops creating instances but keeps structure backings (late component continuations,
    e.g. `sp-slider`'s `getUpdateComplete` reading its `@query` number field, still need them).
 
-`packages/swc-ssr/test/memory.test.ts` guards this (heap growth between renders 4 and 12 of a mid-size page, render
+`packages/spectrum-web-components-ssr/test/memory.test.ts` guards this (heap growth between renders 4 and 12 of a mid-size page, render
 contexts collected, removed listeners collected, out-of-order session ends). Note: in some runs the very first render
 of a process still measures about 317 MB when GC runs right after its promise resolved (no event-loop turn in
 between); it is freed at the next turn (`YIELD=50` in the probe: flat 110 MB from render 1), later renders never show
@@ -377,7 +377,7 @@ it, and a server yields between requests anyway.
   closed overlay at once).
 * L6: hooks only for `@lit-labs/ssr` shadow roots or `sp-*`; the initial-slotchange plan runs after
   `willUpdate()`/`hostUpdate()` (adapters can opt into `slotchangePlan: 'before-willupdate'`).
-* L8: runtime dependencies declared in `packages/swc-ssr/package.json`.
+* L8: runtime dependencies declared in `packages/spectrum-web-components-ssr/package.json`.
 
 ### Second review (0.1.1)
 
@@ -532,7 +532,7 @@ declarations), of which a button-only page references about 204 properties. The 
 post-build tool in SluzbeniList (`AngularApp/unused-css-builder/src/my-builder.ts`: collect `var()` references,
 compute transitive custom-property dependencies, delete unreferenced declarations, collapse `var(--undefined, V)`,
 rename to short names); here it runs per rendered page, with the rendered tree as the source of truth. Contract:
-docs/API.md "Styles". Code: `packages/swc-ssr/src/server/styles/`, `packages/swc-ssr/src/client/server-styles.ts`.
+docs/API.md "Styles". Code: `packages/spectrum-web-components-ssr/src/server/styles/`, `packages/spectrum-web-components-ssr/src/client/server-styles.ts`.
 
 ### Server
 
@@ -644,7 +644,7 @@ Fix (`client/server-styles.ts`, called from the hydration hooks in `hooks.ts` an
   `sp-theme` class), a minified element is not restored at all - the theme's server `<style>` defines the short
   names only, so the complete sheets would find nothing; `onThemeDefined` (the `whenDefined('sp-theme')` microtask,
   after the bridges are re-inserted) restores the hydrated ones.
-* **Theme bridge.** At import of `swc-ssr/client` (before any definition), every `<sp-theme>` (light DOM or open
+* **Theme bridge.** At import of `spectrum-web-components-ssr/client` (before any definition), every `<sp-theme>` (light DOM or open
   shadow roots) whose declarative shadow root holds a marked `<style>` is recorded, with a count of the other marked
   `<style>`s. In the `whenDefined('sp-theme')` microtask - the same task as the upgrade, so before any paint - the
   recorded `<style>` elements are put back into the themes' shadow roots. They are removed when the count of marked
@@ -759,7 +759,7 @@ without changing the output (verified below).
 
 ### Server render
 
-Render time, 0.2.1 (108f5b1, `git archive` of `packages/swc-ssr/src` into `.probe/integrate/base-0.2.1`) against 0.3.0,
+Render time, 0.2.1 (108f5b1, `git archive` of `packages/spectrum-web-components-ssr/src` into `.probe/integrate/base-0.2.1`) against 0.3.0,
 same process setup, same demo catalog, alternating, minimum of 3 (`.probe/integrate/bench.ts`; one-component pages:
 minimum of 20 renders after 5 warm-up renders; the catalog: one render per fresh process after warming up on the
 button, menu and picker pages). The machine was otherwise idle, but see the note on throttling below: absolute
@@ -807,7 +807,7 @@ The render-speed agent's profile under the same conditions (in-process, throttle
 3393 -> 1765 ms sampled per render, `applyLightMutations` 1163 -> 0 ms, GC 622 -> 193 ms; best fresh renders of the
 catalog 0.99-1.05 s (0.73 ms per element) against 2.18-2.38 s for 0.2.x in a quieter period.
 
-What changed (`packages/swc-ssr/src/server/*`, `dom-shim/*`):
+What changed (`packages/spectrum-web-components-ssr/src/server/*`, `dom-shim/*`):
 
 * **Light mutations** (`light-mutations.ts`), the largest item. 0.2.x located every recorded attribute change by
   parsing the final output again and applied each as a full copy of the page (the catalog page is a 39 MB two-byte
@@ -961,9 +961,9 @@ The demo's client was one 2.5 MB unminified file. 0.3.0 builds it like productio
 code-split ESM (`client.js` a 1.2 KB bootstrap, content-hashed chunks), precompressed `.br` / `.gz` siblings, chunks
 `immutable`. Two findings, both about the order of definitions (docs/API.md "Definition order on the client"):
 
-* **Evaluation order.** `swc-ssr/client` must run before `lit-element` creates `LitElement`. With code splitting a
+* **Evaluation order.** `spectrum-web-components-ssr/client` must run before `lit-element` creates `LitElement`. With code splitting a
   bundler may move a module several chunks share into a chunk the entry imports first, so the entry imports only
-  `swc-ssr/client` statically and loads the application with `import()`; the build fails when `lit-element` or a
+  `spectrum-web-components-ssr/client` statically and loads the application with `import()`; the build fails when `lit-element` or a
   Spectrum module is in the entry's static graph (negative control: a static `import 'lit'` fails the build).
 * **Definition order and spacing.** Plain per-module `import()` chunks raced: `sp-sidenav-item` defined before
   `sp-sidenav` threw `startTrackingSelectionForItem is not a function` (3 of 20 loads), and combobox / sidenav items
@@ -976,7 +976,7 @@ code-split ESM (`client.js` a 1.2 KB bootstrap, content-hashed chunks), precompr
   `sp-theme` (defining `sp-theme` first empties its declarative shadow root before any fragment exists: an unthemed
   frame even with `full` CSS, CLS 0.032 on badge, 0.012 on menu). Not fixed in the library: hydration that tolerates
   any definition order would need the client to order Spectrum's first `manageTabindexes` frame (open issue).
-* **Color-area handles in the corner** (review of 0.3.0; fixed in `swc-ssr/client`, not in the demo). On the catalog
+* **Color-area handles in the corner** (review of 0.3.0; fixed in `spectrum-web-components-ssr/client`, not in the demo). On the catalog
   page the `sp-color-area` handles stayed at the top-left corner after hydration (handle offset -7,-7 instead of
   183,-7) in 11 of 14 loads with the split bundle, 0 of 8 with the 0.2.1 single bundle; the server HTML was
   byte-identical. Not a definition-order problem: the demo awaits every entry's `load()` before `hydrateSpectrum()`,
@@ -1011,7 +1011,7 @@ Why: trimming shrinks each sheet, but every shadow root still carries its own co
 36 KB `sp-button` sheet plus the theme (distinct CSS 77 KB of 823 KB trimmed), the catalog 1346 copies of 0.6-1.9 MB
 of distinct CSS. Declarative shadow DOM cannot share a sheet between roots without JavaScript (adopted sheets need
 script), except through the HTTP cache. Contract: docs/API.md "Styles" (`dedupe`). Code:
-`packages/swc-ssr/src/server/styles/dedupe.ts` (store, `Linker`, head hints), `trim.ts` (`linkable()`, `substitute()`),
+`packages/spectrum-web-components-ssr/src/server/styles/dedupe.ts` (store, `Linker`, head hints), `trim.ts` (`linkable()`, `substitute()`),
 `client/server-styles.ts` (links counted as server styles), `demo/src/styles-routes.ts`.
 
 * **Emission.** The collector runs whenever `dedupe` is `'link'`, in `full` mode too, where it only counts the
@@ -1103,7 +1103,7 @@ exactly the linked URLs; every URL immutable `text/css`, an unknown hash 404; th
 `dedupe:post` (hydrated, the held page and its release, and four state groups equal full; no server link or marked
 `<style>` left; every hydrated Lit element on adopted sheets), `dedupe:paint` (button, picker, tabs: 0 unstyled frames
 over a 150 ms round trip, cold and warm, with and without hints and client). `SWC_SSR_DEDUPE=0` skips it.
-`packages/swc-ssr/test/styles-dedupe.test.ts` (18): store / LRU and its protection period, hashing, `hasRelativeUrl`
+`packages/spectrum-web-components-ssr/test/styles-dedupe.test.ts` (18): store / LRU and its protection period, hashing, `hasRelativeUrl`
 (also `image-set()` / `src()`), link placement and markers, a throwing `dedupeUrl`, `head`, reports.
 
 ## Coding conventions
@@ -1113,6 +1113,6 @@ functions in shared hidden classes, so they outlive the instance and pin the ren
 plus a `WeakMap` (as `realm.ts` event links and `adapters/overlay.ts` `keepClosed` do).
 
 TypeScript strict, ESM, Node >= 20. No build step for the server (run with `tsx`); client via esbuild. Keep every Spectrum-specific
-behaviour in `packages/swc-ssr/src/server/adapters/*.ts` (one file per tag or family) registered in a map, so the generic
+behaviour in `packages/spectrum-web-components-ssr/src/server/adapters/*.ts` (one file per tag or family) registered in a map, so the generic
 renderer stays library-agnostic. Log with a `debug` flag only. Every workaround gets a comment naming the Spectrum source
 file/mixin that needs it (e.g. `shared/src/observe-slot-presence.js`).

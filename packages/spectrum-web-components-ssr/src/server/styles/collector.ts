@@ -29,7 +29,7 @@ export const PLACEHOLDER_STYLE_RE = /<style>((?:\u0001swc-css:\d+\u0001)+)<\/sty
  * does not adopt `elementStyles` for a declarative shadow root), so a trimmed text would lack the rules of states
  * entered after hydration; and `<sp-theme>` replaces its declarative shadow root on upgrade with its complete theme
  * fragments (original names), so elements whose CSS uses minified names lose the theme's values until they get their
- * complete stylesheets back. `swc-ssr/client` restores marked elements' complete `elementStyles` and bridges minified
+ * complete stylesheets back. `spectrum-web-components-ssr/client` restores marked elements' complete `elementStyles` and bridges minified
  * theme names until every marked element is restored.
  */
 export const STYLE_MARKER_ATTRIBUTE = 'data-swc-styles';

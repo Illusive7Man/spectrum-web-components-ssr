@@ -12,7 +12,7 @@ This repository holds the npm package, a demo site and the test suite.
 
 | Path | What it is |
 |---|---|
-| [`packages/swc-ssr/`](packages/swc-ssr/README.md) | the package `spectrum-web-components-ssr`. **Start with its README: install, examples, options.** |
+| [`packages/spectrum-web-components-ssr/`](packages/spectrum-web-components-ssr/README.md) | the package `spectrum-web-components-ssr`. **Start with its README: install, examples, options.** |
 | [`demo/`](demo/README.md) | the demo: an Express server with one page per Spectrum component, server-rendered and hydrated |
 | `tests/` | Playwright suite: markup, hydration, flicker and fidelity against a client render, per component |
 | [`docs/API.md`](docs/API.md) | the complete API contract |
@@ -36,7 +36,7 @@ const {html: markup} = await renderSpectrum(
 
 In the browser, `hydrateSpectrum(root)` from `spectrum-web-components-ssr/client` hydrates the markup. Everything else
 (installation, Express and Angular examples, options, smaller pages) is in the
-[package README](packages/swc-ssr/README.md).
+[package README](packages/spectrum-web-components-ssr/README.md).
 
 ## Run the demo
 
@@ -73,7 +73,7 @@ DOM as a client render ([support matrix](tests/results/summary.md)). The three t
 - `picker` and `breadcrumbs`: after hydration the roving `tabindex="0"` sits on the selected item, a client render puts it on the first item.
 - `swatch`: the selected swatch carries an extra `focusable` attribute.
 
-More in the package README under [Limitations](packages/swc-ssr/README.md#limitations).
+More in the package README under [Limitations](packages/spectrum-web-components-ssr/README.md#limitations).
 
 ## Development
 
@@ -100,8 +100,9 @@ SWC_SSR_SMOKE=1 npx playwright test
 SWC_SSR_COMPONENTS=picker,tabs npx playwright test
 ```
 
-Inside the repository the package is the workspace `swc-ssr`, and its `exports` point at the TypeScript sources so the
-demo and the tests run through `tsx` without a build. Publishing switches them to the built `dist/`:
+The committed manifest of `packages/spectrum-web-components-ssr` points its `exports` at the TypeScript sources, so
+the demo and the tests run through `tsx` without a build, and it is marked private. Publishing switches it to the
+built `dist/` and drops the private flag:
 
 ```bash
 npm run build:pkg
@@ -112,11 +113,11 @@ npm run pkg:verify
 ```
 
 ```bash
-node scripts/prepare-publish.mjs --name spectrum-web-components-ssr
+npm run pkg:prepare
 ```
 
 ```bash
-npm publish ./packages/swc-ssr --access public
+npm publish ./packages/spectrum-web-components-ssr --access public
 ```
 
 ```bash

@@ -25,8 +25,8 @@ test('@lit-labs/ssr is pinned to 4.1.x patch releases, and the installed version
 });
 
 test('package-lock.json describes the workspace package like its manifest', () => {
-  const entry = lock.packages?.['packages/swc-ssr'];
-  assert.ok(entry, 'the lock file has an entry for packages/swc-ssr');
+  const entry = lock.packages?.['packages/spectrum-web-components-ssr'];
+  assert.ok(entry, 'the lock file has an entry for packages/spectrum-web-components-ssr');
   assert.equal(entry.version, manifest.version);
   assert.deepEqual(entry.dependencies ?? {}, manifest.dependencies ?? {}, 'dependencies');
   assert.deepEqual(entry.peerDependencies ?? {}, manifest.peerDependencies ?? {}, 'peerDependencies');

@@ -1,20 +1,19 @@
 #!/usr/bin/env node
-// Switches packages/swc-ssr/package.json between its two "faces":
+// Switches packages/spectrum-web-components-ssr/package.json between its two "faces":
 //
 //   workspace (committed): exports -> ./src/*.ts   (the demo, the tests and tsx run straight from the sources)
 //   publish:               exports -> ./dist/*.js  with "types" + "default" conditions (what consumers install)
 //
 // Usage (from the repository root):
-//   node scripts/prepare-publish.mjs [--name <npm-name>] [--allow-placeholders]   workspace -> publish
+//   node scripts/prepare-publish.mjs [--allow-placeholders] [--name <npm-name>]   workspace -> publish
 //   node scripts/prepare-publish.mjs --restore                                    publish -> workspace
 //
-// "prepare" first copies the committed package.json byte for byte to packages/swc-ssr/package.json.orig (gitignored,
+// "prepare" first copies the committed package.json byte for byte to packages/spectrum-web-components-ssr/package.json.orig (gitignored,
 // never packed: the package's "files" list is a whitelist) and "--restore" copies it back and deletes the copy, so the
 // round trip is lossless. Run "npm run build:pkg" first: prepare refuses to run when dist is missing an entry point.
 //
-// --name <npm-name>   also renames the package and drops "private": true (the committed package.json keeps the
-//                     workspace name "swc-ssr" and "private": true so nothing gets published by accident). The
-//                     suggested public name is "spectrum-web-components-ssr".
+// The committed package.json carries the npm name and "private": true, so that nothing gets published by accident;
+// "prepare" drops the flag. --name <npm-name> publishes under another name (a scoped fork, a test name).
 // --allow-placeholders  skip the check that rejects the REPLACE_WITH_OWNER repository placeholders (used by
 //                     scripts/verify-package.mjs, which never publishes).
 import {copyFileSync, existsSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
@@ -22,7 +21,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const pkgDir = path.join(root, 'packages', 'swc-ssr');
+const pkgDir = path.join(root, 'packages', 'spectrum-web-components-ssr');
 const manifestPath = path.join(pkgDir, 'package.json');
 const backupPath = path.join(pkgDir, 'package.json.orig');
 
@@ -45,10 +44,10 @@ const unknown = args.filter((arg, i) => arg.startsWith('--') && !['--restore', '
 if (unknown.length > 0) fail(`unknown option ${unknown.join(', ')}`);
 
 if (flag('--restore')) {
-  if (!existsSync(backupPath)) fail('nothing to restore (packages/swc-ssr/package.json.orig does not exist)');
+  if (!existsSync(backupPath)) fail('nothing to restore (packages/spectrum-web-components-ssr/package.json.orig does not exist)');
   copyFileSync(backupPath, manifestPath);
   rmSync(backupPath);
-  console.log('prepare-publish: restored packages/swc-ssr/package.json (workspace exports -> ./src)');
+  console.log('prepare-publish: restored packages/spectrum-web-components-ssr/package.json (workspace exports -> ./src)');
   process.exit(0);
 }
 
@@ -76,11 +75,9 @@ if (Object.values(exportsMap).every((target) => typeof target === 'string')) {
 }
 
 const published = {...manifest, exports: exportsMap};
+delete published.private;
 const name = option('--name');
-if (name !== undefined) {
-  published.name = name;
-  delete published.private;
-}
+if (name !== undefined) published.name = name;
 
 const placeholders = JSON.stringify([published.repository, published.bugs, published.homepage]).includes('REPLACE_WITH_OWNER');
 if (placeholders && !flag('--allow-placeholders')) {
@@ -90,7 +87,7 @@ if (placeholders && !flag('--allow-placeholders')) {
 copyFileSync(manifestPath, backupPath);
 writeFileSync(manifestPath, `${JSON.stringify(published, null, 2)}\n`);
 console.log(
-  `prepare-publish: packages/swc-ssr/package.json now points at ./dist` +
-    (name === undefined ? ' (name and "private" unchanged: npm publish will refuse until you pass --name)' : `, name "${name}", public`),
+  `prepare-publish: packages/spectrum-web-components-ssr/package.json now points at ./dist` +
+    `, name "${published.name}", public`,
 );
 console.log('prepare-publish: after packing or publishing run "npm run pkg:restore"');

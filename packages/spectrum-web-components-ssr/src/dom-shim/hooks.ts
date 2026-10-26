@@ -1,6 +1,6 @@
 /**
- * Internal hooks shared between the DOM shim extras (`swc-ssr/dom-shim`) and the server renderer
- * (`swc-ssr/server`). Nothing in here is Spectrum-specific.
+ * Internal hooks shared between the DOM shim extras (`spectrum-web-components-ssr/dom-shim`) and the server renderer
+ * (`spectrum-web-components-ssr/server`). Nothing in here is Spectrum-specific.
  *
  * The shim extras only define *defaults* (empty light DOM, no-op rAF sink, real randomness). The server
  * renderer plugs per-render behaviour into these hooks while it renders and removes it afterwards, so no state

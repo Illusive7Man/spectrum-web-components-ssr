@@ -13,7 +13,7 @@ import {ALL_COMPONENTS_ROW} from './helpers/summary.ts';
 /**
  * The all-components page: `GET /` server-renders the whole catalog in one `renderSpectrum()` call, `GET /csr` is its
  * client-rendered counterpart. Components that render fine on their own pages can still fail together (the render of
- * the whole page may take a third pass, see packages/swc-ssr/test/third-pass.test.ts), so the page is checked as a
+ * the whole page may take a third pass, see packages/spectrum-web-components-ssr/test/third-pass.test.ts), so the page is checked as a
  * whole: SSR markup and render report, hydration, and the client-rendered reference. Results are recorded as the
  * `all-components` row of the "Pages" table in tests/results/summary.md (not counted as a component).
  * A soft check compares the hydrated slider section of `/` with the hydrated `/component/slider` section (the same

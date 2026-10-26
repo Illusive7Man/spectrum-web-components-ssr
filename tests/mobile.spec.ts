@@ -14,7 +14,7 @@ import {CLS_MAX, FLICKER_MAX, PIXEL_THRESHOLD} from './helpers/thresholds.ts';
  * Phones. The server's `matchMedia()` never matches, so components with a `MatchMediaController`
  * (`reactive-controllers/src/MatchMedia.js`: `sp-picker`, `sp-action-menu`, `sp-contextual-help`) are rendered in
  * their desktop state. On a touch phone `IS_MOBILE` matches from the first client render on, so without the client
- * adapters (swc-ssr/client `hooks.ts`, "MatchMediaController") the hydrating render differs from the server markup.
+ * adapters (spectrum-web-components-ssr/client `hooks.ts`, "MatchMediaController") the hydrating render differs from the server markup.
  * This spec loads those components with a phone emulation and checks:
  *  - the emulation really matches Spectrum's `IS_MOBILE` query (otherwise the test proves nothing);
  *  - hydration: no HydrationReport errors, no console errors (the client logs every mismatch recovery with

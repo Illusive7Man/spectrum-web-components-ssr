@@ -1,7 +1,7 @@
 /**
  * Pinning `MatchMediaController.matches` (`reactive-controllers/src/MatchMedia.js`) for the hydrating update.
  *
- * The server's `matchMedia()` never matches (swc-ssr/dom-shim `mediaQueryList`), so the server renders every
+ * The server's `matchMedia()` never matches (spectrum-web-components-ssr/dom-shim `mediaQueryList`), so the server renders every
  * component in its "no media query matches" state: e.g. `sp-picker` / `sp-action-menu` with `IS_MOBILE` false, i.e.
  * an `sp-popover` overlay container instead of `sp-tray` (rendered right away when the overlay is rendered, e.g. for
  * the deprecated `<sp-menu>` child) and no `mobile-view` on the menu; `sp-contextual-help` with `type="auto"`, a
@@ -14,7 +14,7 @@
  * afterwards with `requestUpdate()`, so the hydrating render matches the server markup and the next update renders
  * (and commits) the mobile state - what a client-rendered component shows.
  *
- * No DOM or lit imports: unit-tested in packages/swc-ssr/test/client-match-media.test.ts.
+ * No DOM or lit imports: unit-tested in packages/spectrum-web-components-ssr/test/client-match-media.test.ts.
  */
 
 /** The value the server's `matchMedia()` reports for every query. */

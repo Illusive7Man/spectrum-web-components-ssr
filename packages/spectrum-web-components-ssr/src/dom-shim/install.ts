@@ -218,7 +218,7 @@ const cssEscape = (value: string): string =>
  * The server's `matchMedia()`: no media query ever matches (there is no viewport, pointer or color scheme on the
  * server). Components render their "no query matches" state, e.g. `sp-picker` / `sp-action-menu` /
  * `sp-contextual-help` (`reactive-controllers/src/MatchMedia.js`, `IS_MOBILE`) their desktop state. The client
- * hydration adapters of those components (swc-ssr/client `hooks.ts`, `match-media.ts`) pin their controllers to this
+ * hydration adapters of those components (spectrum-web-components-ssr/client `hooks.ts`, `match-media.ts`) pin their controllers to this
  * value (`SERVER_MEDIA_MATCHES = false`) for the hydrating update, so a phone hydrates the desktop markup and then
  * re-renders in its mobile state. Keep the two in sync if this ever becomes configurable.
  */

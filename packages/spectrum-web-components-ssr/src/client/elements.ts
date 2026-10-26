@@ -1,7 +1,7 @@
 /**
  * Which elements the client side of swc-ssr takes care of. Pure predicates over minimal DOM-like shapes (no DOM, no
  * lit imports), shared by `index.ts` (`hydrateSpectrum()`: collection, definition waits, report) and `hooks.ts` (the
- * hydration hooks), and unit-tested without a browser (packages/swc-ssr/test/client-elements.test.ts).
+ * hydration hooks), and unit-tested without a browser (packages/spectrum-web-components-ssr/test/client-elements.test.ts).
  */
 
 export const DEFER_ATTRIBUTE = 'defer-hydration';

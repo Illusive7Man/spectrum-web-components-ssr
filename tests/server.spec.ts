@@ -368,7 +368,7 @@ test.describe('client build', () => {
     expect(registrations.some((name) => name.startsWith('register-sidenav-'))).toBe(true);
   });
 
-  test('swc-ssr/client is the first module the entry evaluates and lit-element is not in its static graph', async () => {
+  test('spectrum-web-components-ssr/client is the first module the entry evaluates and lit-element is not in its static graph', async () => {
     const entry = readFileSync(path.join(distDir, 'client.js'), 'utf8');
     // The static imports of the entry: shared chunks only, every one of them evaluated before the entry's own code.
     const staticImports = [...entry.matchAll(/^import(?:\{[^}]*\}from|)"(\.\/chunks\/[^"]+)";?/gm)].map((match) => match[1]!);
@@ -381,7 +381,7 @@ test.describe('client build', () => {
       for (const match of code.matchAll(/(?:^|[;}])(?:import|export)(?:[^"';]*?from)?"(\.\/[^"]+)"/g)) walk(match[1]!, file);
     };
     for (const spec of staticImports) walk(spec, path.join(distDir, 'client.js'));
-    expect(seen.size, 'the entry has static imports (swc-ssr/client and its modules)').toBeGreaterThan(0);
+    expect(seen.size, 'the entry has static imports (spectrum-web-components-ssr/client and its modules)').toBeGreaterThan(0);
     let hydrateSupport = false;
     for (const file of seen) {
       const code = readFileSync(file, 'utf8');
@@ -390,6 +390,6 @@ test.describe('client build', () => {
       expect(code.includes('litElementHydrateSupport?.'), `${path.basename(file)} must not evaluate lit-element before the entry`).toBe(false);
     }
     expect(hydrateSupport, 'lit-element-hydrate-support is part of the entry graph').toBe(true);
-    expect(entry, 'the application is loaded with import() after swc-ssr/client ran').toMatch(/import\("\.\/chunks\/client-app-[A-Z0-9]+\.js"\)/);
+    expect(entry, 'the application is loaded with import() after spectrum-web-components-ssr/client ran').toMatch(/import\("\.\/chunks\/client-app-[A-Z0-9]+\.js"\)/);
   });
 });

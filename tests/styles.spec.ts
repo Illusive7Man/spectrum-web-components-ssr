@@ -56,7 +56,7 @@ import {CLS_MAX, FLICKER_MAX, LAYOUT_TOLERANCE_PX, PIXEL_THRESHOLD} from './help
  *                     afterwards no `<style data-swc-styles>` is left in an sp-* shadow root. This is what broke in
  *                     minified mode: Lit's hydration support adopts no stylesheets, so a hydrated element kept its
  *                     trimmed server CSS (no rules for new states; renamed theme properties that `<sp-theme>` drops
- *                     when it upgrades) - swc-ssr/client now gives marked elements their complete stylesheets back
+ *                     when it upgrades) - spectrum-web-components-ssr/client now gives marked elements their complete stylesheets back
  *   post-hydration    the same at normal timing (`hydrateSpectrum()` right after the definitions, what the demo does):
  *                     after `window.__swcSsrHydration` the trimmed and the minified page each equal the hydrated full-CSS
  *                     page (0 px); no `<style data-swc-styles>` is left in any shadow root and every hydrated sp-* Lit

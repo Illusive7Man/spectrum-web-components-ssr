@@ -1,5 +1,5 @@
 /**
- * `swc-ssr/dom-shim`: the Lit SSR global DOM shim plus the extras Spectrum Web Components (1st-gen) need.
+ * `spectrum-web-components-ssr/dom-shim`: the Lit SSR global DOM shim plus the extras Spectrum Web Components (1st-gen) need.
  *
  * The Lit shim is installed by the side-effect import below, i.e. as soon as this module is evaluated (it has to
  * happen before `lit` is evaluated, otherwise Lit and the shim end up with different `customElements`

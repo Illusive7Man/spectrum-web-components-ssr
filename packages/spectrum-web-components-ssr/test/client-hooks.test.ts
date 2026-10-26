@@ -1,5 +1,5 @@
 /**
- * swc-ssr/client hydration hooks (`src/client/hooks.ts`) on a fake LitElement, without a browser:
+ * spectrum-web-components-ssr/client hydration hooks (`src/client/hooks.ts`) on a fake LitElement, without a browser:
  *  - L6: the hooks only apply to server-rendered shadow roots (a `<!--lit-part-->` marker) and Spectrum (`sp-*`)
  *    elements; other Lit elements with a pre-existing shadow root get no adapters and no extra `render()` call;
  *    the initial-slotchange plan calls `render()` after `willUpdate()`, unless an adapter asks for the early plan;

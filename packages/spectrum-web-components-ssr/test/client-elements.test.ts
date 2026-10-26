@@ -1,5 +1,5 @@
 /**
- * swc-ssr/client: which elements hydrateSpectrum() collects, waits for and reports on (H2: not only `sp-*` tags, e.g.
+ * spectrum-web-components-ssr/client: which elements hydrateSpectrum() collects, waits for and reports on (H2: not only `sp-*` tags, e.g.
  * Spectrum's `<overlay-trigger>`), and which declarative shadow roots the hydration hooks treat as server-rendered
  * (L6). Pure logic over DOM-like shapes, no browser needed.
  */

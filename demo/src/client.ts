@@ -1,11 +1,11 @@
-import 'swc-ssr/client'; // must stay the FIRST import: installs lit's hydration support before lit / Spectrum load
-import {hydrationReport} from 'swc-ssr/client';
-import type {HydrationReport} from 'swc-ssr/client';
+import 'spectrum-web-components-ssr/client'; // must stay the FIRST import: installs lit's hydration support before lit / Spectrum load
+import {hydrationReport} from 'spectrum-web-components-ssr/client';
+import type {HydrationReport} from 'spectrum-web-components-ssr/client';
 
 /**
  * Browser entry of the demo (dist/client.js). It is a small bootstrap on purpose:
  *
- *   1. `swc-ssr/client` is its only static import. Evaluating it installs lit's hydration support (and the hooks
+ *   1. `spectrum-web-components-ssr/client` is its only static import. Evaluating it installs lit's hydration support (and the hooks
  *      around it), which has to happen BEFORE `lit-element` creates the LitElement class.
  *   2. The application (demo/src/client-app.ts: lit, the page template, the catalog, hydrateSpectrum()) is loaded with
  *      `import()` afterwards. With code splitting a bundler may move any module that several chunks share into a
@@ -23,7 +23,7 @@ import type {HydrationReport} from 'swc-ssr/client';
  * Hooks for the e2e tests:
  *   window.__swcSsrMode        'ssr' | 'csr'
  *   window.__swcSsrHydration   Promise<HydrationReport>, set synchronously, resolves when the page has settled
- *   window.__swcSsrReport()    the current HydrationReport (swc-ssr/client hydrationReport())
+ *   window.__swcSsrReport()    the current HydrationReport (spectrum-web-components-ssr/client hydrationReport())
  *   window.__swcSsrDefined     true once every custom element of the page is defined (before hydrateSpectrum() runs)
  *   window.__swcSsrRelease()   with ?hydrateDelay=hold: lets hydrateSpectrum() run
  *   window.__swcSsrDefineLate() with ?late=: defines the held-back tags now; resolves (with their number) when they are

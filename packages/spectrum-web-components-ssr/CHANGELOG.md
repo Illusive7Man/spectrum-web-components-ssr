@@ -4,7 +4,16 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 Until 1.0.0 a minor version may contain breaking changes.
 
-## [0.3.3] - 2026-10-23
+## [Unreleased]
+
+### Changed
+
+- Repository: the workspace package is `packages/spectrum-web-components-ssr` and carries the npm name, so the demo,
+  the tests and the Vercel build import `spectrum-web-components-ssr/*` like an application does. `prepare-publish`
+  no longer renames the package; it only switches the exports to `dist/` and drops the private flag. No change to the
+  published package.
+
+## [0.3.2] - 2026-10-23
 
 ### Changed
 
@@ -46,13 +55,13 @@ Render speed, fewer bytes (details: `docs/DESIGN.md` "Performance" and "Style de
   root's pending stylesheet link and never paints unstyled content (a cold load renders progressively and finishes later),
   Firefox paints the content first (2-9 unstyled frames even from a warm cache).
 - `RenderSpectrumResult.head`: with `dedupe: 'link'` one `<link rel="preload" as="style">` per linked URL, for the
-  page's `<head>` ('' otherwise; `renderSpectrum` of `swc-ssr/server` always sets it). `StylesReport.dedupe`
+  page's `<head>` ('' otherwise; `renderSpectrum` of `spectrum-web-components-ssr/server` always sets it). `StylesReport.dedupe`
   (`StylesDedupeReport`: the linked texts with hash, url, bytes and links; `linkedBytes`, `inlineBytes`),
   `StylesReport.sheets[].hash`, `StyleMarker` `'complete'`.
 - Exports: `styleSheetStore`, `StyleSheetStore`, `getStyleSheet(hash)`, `styleSheetHash(css)`,
   `styleHeadOf(report.styles, 'preload' | 'stylesheet-not-all')`, `DEFAULT_STYLE_SHEET_PATH`, `STYLE_SHEET_HASH_RE`;
   types `StyleHeadHint`, `StylesDedupeReport`.
-- `swc-ssr/client` treats a server `<link data-swc-styles>` like a marked `<style>` (restored, removed, minified ones
+- `spectrum-web-components-ssr/client` treats a server `<link data-swc-styles>` like a marked `<style>` (restored, removed, minified ones
   kept until settled; never bridged; `'complete'` does not trigger the theme-pending warning); without constructable
   stylesheets a `<style>` with the complete text takes its place.
 - Demo: compression (brotli q4 preferred over gzip, nothing under 1 KB; `/dist` from build-time `.br` / `.gz`, chunks
@@ -102,7 +111,7 @@ Render speed, fewer bytes (details: `docs/DESIGN.md` "Performance" and "Style de
   no marker followed: quadratic in the number of raw regions (5,000 regions 775-3124 ms, 20,000 regions 15 s; 0.2.1
   5-36 ms). The scan result is kept across regions (each character scanned once; 20,000 regions 32 ms), and the check
   of every edit against the regions is a binary search.
-- `swc-ssr/client`: `sp-color-area` handles stayed in the top-left corner after hydration whenever a frame passed
+- `spectrum-web-components-ssr/client`: `sp-color-area` handles stayed in the top-left corner after hydration whenever a frame passed
   between the element's definition and its hydrating update (the catalog page with the code-split demo bundle: 11 of
   14 loads; any page with `?hydrateDelay=300`, also with the 0.2.x single bundle). Its own `connectedCallback()` starts
   a ResizeObserver at the upgrade, while the element still waits with `defer-hydration`; measured before hydration,
@@ -136,7 +145,7 @@ Last review findings of the style trimming (details: `docs/API.md` "Styles", `do
 
 ### Fixed
 
-- `minifyCustomProperties` judged ownership from the trimmed texts only, but `swc-ssr/client` restores the complete
+- `minifyCustomProperties` judged ownership from the trimmed texts only, but `spectrum-web-components-ssr/client` restores the complete
   stylesheets: names a parent defines and only a rule the trimmer dropped from a child's sheet reads were still renamed
   (`sp-menu` / `sp-menu-group` -> `sp-menu-item` / `sp-menu-divider`, `sp-table` -> its head cells and rows,
   `sp-breadcrumbs` -> `sp-breadcrumb-item`, `sp-search` -> the textfield family; 42 names on the catalog with
@@ -187,7 +196,7 @@ Fixes of the review of the style trimming (details: `docs/API.md` "Styles", `doc
   `sp-picker` -> `sp-popover`, `sp-number-field` -> `sp-infield-button`, `sp-tray` -> `sp-dialog-wrapper`; 124-155
   elements styled differently while the child was undefined, for good if it never got defined). Both sides changed:
   `minifyCustomProperties` renames only names that the theme alone defines or that live inside the stylesheets of one
-  element class (or one stylesheet several classes share), and `swc-ssr/client` keeps a restored element's minified
+  element class (or one stylesheet several classes share), and `spectrum-web-components-ssr/client` keeps a restored element's minified
   `<style>` (a subset of its adopted sheets, which win the cascade) until no element runs on minified CSS.
 - `minifyCustomProperties` never renames Spectrum's public customisation names `--mod-*`, `--highcontrast-*` and
   `--system-*` any more: kept component rules define many of them (253 `--mod-*` names on the catalog), and renaming
@@ -205,7 +214,7 @@ Fixes of the review of the style trimming (details: `docs/API.md` "Styles", `doc
 - Minified output is larger because of the names above: button page CSS 298 -> 454 KiB (gzip 13 -> 15 KiB), picker
   231 -> 330 KiB (gzip 24 -> 43 KiB), whole catalog 5689 -> 8224 KiB = 31.4 -> 45.4 % of full (gzip 486 -> 640 KiB).
   Trimmed output is unchanged.
-- `swc-ssr/client` costs less on pages without trimmed CSS: the fallback for unmarked server CSS compares lengths
+- `spectrum-web-components-ssr/client` costs less on pages without trimmed CSS: the fallback for unmarked server CSS compares lengths
   first and the text once per class, and the server `<style>` lookup no longer copies `childNodes` (whole catalog,
   `full` mode, CPU profile, 6 loads each: 20-33 ms -> 7-14 ms of server-style work while hydrating, 10-28 ms -> 6-10 ms
   for the scan at load).
@@ -257,7 +266,7 @@ Optional trimming of the server CSS, and the hydration semantics it needs (detai
 - Hydrated pages no longer lose their styling with trimmed / minified server CSS (reported: "hydration broke / ignored
   all styling"). Lit's hydration support keeps a hydrated element's server `<style>` as its only stylesheet, and
   `<sp-theme>` replaces its server `<style>` with the complete theme when it upgrades, so minified components lost
-  every theme value and trimmed components had no rules for later states. `swc-ssr/client` now gives every hydrated
+  every theme value and trimmed components had no rules for later states. `spectrum-web-components-ssr/client` now gives every hydrated
   element its class's complete `elementStyles` (shared constructable sheets) in the same task as its hydrating update,
   and keeps the server's `<sp-theme>` `<style>` until the last marked `<style>` is gone.
 - `hydrateSpectrum()` called more than a frame after the definitions loaded no longer waits out its timeouts on pages
@@ -327,7 +336,7 @@ Fixes of a second independent review (details: `docs/DESIGN.md`, "Hardening" / "
 - Peer dependency `@lit-labs/ssr` narrowed to `~4.1.0`: the renderers rely on 4.1.0 internals (the element-part marker
   passed as a static attribute, the host-stack behaviour, `lib/render.js` `renderThunked`). `package-lock.json`
   refreshed.
-- `setListenerLog` (`swc-ssr/dom-shim`) accepts any `{push(record)}` log (`ListenerLog`); arrays still work. The
+- `setListenerLog` (`spectrum-web-components-ssr/dom-shim`) accepts any `{push(record)}` log (`ListenerLog`); arrays still work. The
   shim logs a `document` listener after adding it.
 
 ### Documented
@@ -341,18 +350,18 @@ First version. Targets `@spectrum-web-components/*` 1.12.4 (1st-gen) and `@lit-l
 
 ### Added
 
-- `swc-ssr/server`: `renderSpectrum()`, a two-pass renderer on top of unmodified `@lit-labs/ssr` that gives Spectrum
+- `spectrum-web-components-ssr/server`: `renderSpectrum()`, a two-pass renderer on top of unmodified `@lit-labs/ssr` that gives Spectrum
   elements their light DOM, slots and shadow content on the server, with options `deferHydration`, `lang`, `lifecycle`,
   `lifecycleByTag`, `isManagedClass`, `elementRenderers`, `timeoutMs`, `lazyDefinitionWaitMs`, `deterministicIds` and
   `debug`, and a per-render report (errors, warnings, fallbacks, passes).
 - Adapter registry (`registerAdapter`) with built-in adapters for `sp-theme`, `sp-overlay`, `sp-picker`,
   `sp-breadcrumbs`, `sp-split-view` and `sp-color-wheel`, and a language inspector that warns when a locale falls back
   to `navigator.language`.
-- `swc-ssr/dom-shim`: the DOM globals Spectrum needs under Node on top of `@lit-labs/ssr-dom-shim`, including
+- `spectrum-web-components-ssr/dom-shim`: the DOM globals Spectrum needs under Node on top of `@lit-labs/ssr-dom-shim`, including
   browser-like attribute reactions, constraint validation, the Popover API, listener `this`-binding and a
   `crypto.getRandomValues` wrapper that is deterministic only for Spectrum's `randomID()` requests
   (`configureRandomSource`).
-- `swc-ssr/client`: `hydrateSpectrum()` with a Lit-template path and a framework-agnostic path, `hydrationReport()`,
+- `spectrum-web-components-ssr/client`: `hydrateSpectrum()` with a Lit-template path and a framework-agnostic path, `hydrationReport()`,
   `registerHydrationAdapter()`, emulation of the initial `slotchange`, recovery from hydration mismatches and a
   `matchMedia` adapter for phones.
 - Packaging: `tsconfig.build.json`, an `exports` map for `./server`, `./client` and `./dom-shim`, the publish manifest

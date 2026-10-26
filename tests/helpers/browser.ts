@@ -1,7 +1,7 @@
 import type {Page} from '@playwright/test';
 import {HYDRATION_TIMEOUT_MS} from './thresholds.ts';
 
-/** Shape of `HydrationReport` from `swc-ssr/client` (docs/API.md); duplicated here to keep the tests decoupled. */
+/** Shape of `HydrationReport` from `spectrum-web-components-ssr/client` (docs/API.md); duplicated here to keep the tests decoupled. */
 export interface HydrationReportLike {
   errors: string[];
   warnings: string[];

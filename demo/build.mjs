@@ -96,7 +96,7 @@ const result = await build({
   chunkNames: 'chunks/[name]-[hash]',
   bundle: true,
   // Code splitting turns the dynamic import()s (the application, the page theme, every catalog entry's registration
-  // modules) into separate chunks. The entry itself only holds what it evaluates statically: swc-ssr/client.
+  // modules) into separate chunks. The entry itself only holds what it evaluates statically: spectrum-web-components-ssr/client.
   splitting: true,
   format: 'esm',
   platform: 'browser',
@@ -115,7 +115,7 @@ const builtMs = performance.now() - started;
  * Evaluation order
  * -------------------------------------------------------------------------------------------------------------- */
 
-// lit-element-hydrate-support (imported first by swc-ssr/client) has to be evaluated BEFORE lit-element: it installs
+// lit-element-hydrate-support (imported first by spectrum-web-components-ssr/client) has to be evaluated BEFORE lit-element: it installs
 // globalThis.litElementHydrateSupport, which lit-element reads once while it defines LitElement. With code splitting a
 // bundler is free to move modules into shared chunks that the entry imports FIRST, so a static import of `lit` (or of
 // a Spectrum module) in the entry's import graph would silently disable hydration support and make every element
@@ -152,13 +152,13 @@ function checkEvaluationOrder(metafile) {
       throw new Error(
         `build.mjs: ${file} is part of the static import graph of the entry (it is evaluated before the entry's own code) ` +
           `and contains ${offending.slice(0, 3).join(', ')}${offending.length > 3 ? ', ...' : ''}. ` +
-          "lit-element must be evaluated after swc-ssr/client has installed lit's hydration support: " +
+          "lit-element must be evaluated after spectrum-web-components-ssr/client has installed lit's hydration support: " +
           'load it with import() (demo/src/client.ts -> client-app.ts), not with a static import.',
       );
     }
   }
   if (!order.some((file) => inputsOf(file).some((input) => input.includes('@lit-labs/ssr-client/lit-element-hydrate-support')))) {
-    throw new Error('build.mjs: lit-element-hydrate-support is not part of the entry graph (swc-ssr/client must be imported by the entry)');
+    throw new Error('build.mjs: lit-element-hydrate-support is not part of the entry graph (spectrum-web-components-ssr/client must be imported by the entry)');
   }
   return order;
 }

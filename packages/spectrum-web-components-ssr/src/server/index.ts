@@ -1,5 +1,5 @@
 /**
- * `swc-ssr/server`: server-side rendering of Spectrum Web Components (1st-gen) on top of `@lit-labs/ssr`.
+ * `spectrum-web-components-ssr/server`: server-side rendering of Spectrum Web Components (1st-gen) on top of `@lit-labs/ssr`.
  *
  * Importing this module installs the Lit SSR global DOM shim (it must be evaluated before `lit`); call
  * `installSpectrumSsr()` before importing any `@spectrum-web-components/*` module.
