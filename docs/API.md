@@ -499,8 +499,11 @@ text, fallbacks included, in order of first appearance: `references: scanCustomP
 **Hydration: trimmed and minified pages REQUIRE `spectrum-web-components-ssr/client`.** Lit's hydration support
 (`@lit-labs/ssr-client/lit-element-hydrate-support.js`) returns the declarative shadow root from `createRenderRoot()`
 and never calls `adoptStyles()`: a hydrated element keeps the server's `<style>` as its ONLY stylesheet
-(`adoptedStyleSheets` stays empty). `<sp-theme>` is the opposite: its constructor's `attachShadow()` clears the
-declarative shadow root and it adopts its complete theme fragments. Without `spectrum-web-components-ssr/client`, a trimmed page renders
+(`adoptedStyleSheets` stays empty). `<sp-theme>` is the opposite: it is not a Lit element, its constructor calls
+`attachShadow()` and it adopts its complete theme fragments. (`attachShadow()` on a declarative shadow root empties it
+and re-slots the whole page, which restarts every CSS animation in it; the client wraps `Element.prototype.attachShadow`
+so that `<sp-theme>` keeps its root, drops the duplicate `<slot>` the constructor appends and releases the server's
+complete theme CSS once the sheets are adopted - `src/client/theme-upgrade.ts`.) Without `spectrum-web-components-ssr/client`, a trimmed page renders
 correctly until something changes (the app toggles `disabled`, a variant, `selected`, an overlay opens): those rules
 were trimmed away and stay missing. A minified page breaks the moment `<sp-theme>` upgrades: the components read
 renamed properties (`var(--a)`) that only the server's theme `<style>` defined (measured on the button page: 85,664
@@ -518,7 +521,7 @@ differing pixels, the buttons lose their background and shrink from 32 to 22.8 p
   (before the next paint) and removed when the last marked `<style>` in the document is gone (confirmed by a scan), or
   at the end of `hydrateSpectrum()` when none is left - but only from themes that have upgraded. A theme whose
   definition loads after the components hydrated, or never, keeps its server `<style>` where the server put it (it
-  is all that theme has; its upgrade clears it anyway). `hydrateSpectrum()` reports such a theme:
+  is all that theme has). `hydrateSpectrum()` reports such a theme:
   `HydrationReport.warnings` gets `theme pending: sp-theme not defined; trimmed/minified theme values incomplete (...)`
   (since 0.2.2). Elements not hydrated yet - an application that calls
   `hydrateSpectrum()` late (an Angular bootstrap), elements that hydrate lazily or are defined late - keep their theme

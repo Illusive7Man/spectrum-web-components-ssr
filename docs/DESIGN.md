@@ -616,7 +616,8 @@ component, and the remaining bulk is the components' own custom-property declara
 Measured in a browser on the button page before the client fix: full and trimmed mode showed 0 differing pixels
 before vs after hydration, minified mode 85,664 (`.probe/hydration-styles.ts`): the button background became
 transparent and its height went from 32 to 22.8 px. After hydration `<sp-theme>` had 3 adopted sheets and no `<style>`
-(Theme.js `attachShadow()` clears the declarative shadow root, `adoptStyles()` adopts its complete fragments), while
+(Theme.js `attachShadow()` would clear the declarative shadow root - the client keeps it, see `theme-upgrade.ts` -,
+`adoptStyles()` adopts its complete fragments), while
 `sp-button` had 0 adopted sheets and 1 `<style>`: `@lit-labs/ssr-client/lit-element-hydrate-support.js`'s
 `createRenderRoot()` returns the existing shadow root and never calls `adoptStyles()`, so a hydrated element keeps the
 server `<style>` as its only stylesheet. Consequences: (1) minified components read renamed properties that stop

@@ -17,6 +17,7 @@ import {
   THEME_PENDING_WARNING,
 } from './server-styles.js';
 import {DEFER_ATTRIBUTE, isHydrationCandidate, tagsToDefine} from './elements.js';
+import {keepThemeShadowRoots} from './theme-upgrade.js';
 
 export {registerHydrationAdapter} from './hooks.js';
 export type {HydrationAdapter} from './hooks.js';
@@ -24,6 +25,9 @@ export type {HydrationAdapter} from './hooks.js';
 // Chains onto lit-element-hydrate-support (also before lit-element is evaluated): per-element hydration adapters,
 // the initial `slotchange` that declarative shadow roots never get, and recovery from hydration mismatches.
 installHydrationHooks(render);
+// `<sp-theme>` is not a Lit element: its constructor's `attachShadow()` would empty its declarative shadow root and
+// re-slot the whole page, restarting every CSS animation in it (theme-upgrade.ts). Must run before `<sp-theme>` is defined.
+keepThemeShadowRoots();
 // Trimmed / minified server CSS (docs/API.md "Styles"): keeps the server's `<sp-theme>` styles while elements depend on
 // them. Must run before `<sp-theme>` is defined, like the hooks above.
 bridgeServerThemes();

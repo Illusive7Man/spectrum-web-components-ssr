@@ -6,6 +6,16 @@ Until 1.0.0 a minor version may contain breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- CSS animations no longer restart when `<sp-theme>` upgrades. Spectrum's `Theme` constructor calls `attachShadow()`,
+  which empties a declarative shadow root and re-slots the whole page: every running animation inside it (an
+  indeterminate `sp-progress-circle` or `sp-progress-bar`, the rings of `sp-coach-indicator`) was cancelled and started
+  again the moment the theme's definition loaded. `spectrum-web-components-ssr/client` now wraps
+  `Element.prototype.attachShadow`: an `<sp-theme>` keeps its declarative root, the duplicate `<slot>` the constructor
+  appends is dropped, and the server's complete theme CSS is removed once the theme adopted its sheets (trimmed and
+  minified theme CSS stays with the bridges, as before). `tests/theme-upgrade.spec.ts` checks the three pages.
+
 ### Changed
 
 - Repository: the workspace package is `packages/spectrum-web-components-ssr` and carries the npm name, so the demo,

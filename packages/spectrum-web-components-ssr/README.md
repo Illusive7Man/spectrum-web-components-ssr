@@ -79,6 +79,11 @@ await hydrateSpectrum(document.getElementById('app')!, {template: page()});
 `hydrateSpectrum()` never rejects. It resolves to a report: `{errors, warnings, deferred, hydratedCount, durationMs}`;
 a non-empty `deferred` means some elements are still waiting for their definition.
 
+Importing the `/client` entry also wraps one browser method, `Element.prototype.attachShadow`, for `<sp-theme>`: Spectrum's
+theme is not a Lit element, and the `attachShadow()` call in its constructor would empty the server-rendered shadow root
+and re-slot the whole page, restarting every CSS animation in it. The wrapper hands the theme its existing root instead.
+Spectrum itself is not touched.
+
 ## A complete page with Express
 
 ```ts

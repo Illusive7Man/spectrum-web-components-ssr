@@ -4,9 +4,10 @@
  * What a browser does with a server-rendered Lit element: `lit-element-hydrate-support` returns the declarative shadow
  * root from `createRenderRoot()` WITHOUT calling `adoptStyles()`, so a hydrated element adopts nothing: the `<style>`
  * the server wrote stays its only stylesheet (`shadowRoot.adoptedStyleSheets` is empty, measured). `<sp-theme>` is the
- * opposite: it is a plain `HTMLElement` whose constructor calls `attachShadow()`, which clears the declarative shadow
- * root (the server's `<style>` is gone), and it then adopts the complete theme fragments itself (`Theme.adoptStyles()`,
- * a microtask later, and again whenever a theme fragment is registered).
+ * opposite: it is a plain `HTMLElement` whose constructor calls `attachShadow()` - which would clear the declarative
+ * shadow root and re-slot the whole page; theme-upgrade.ts hands it the existing root instead - and it then adopts the
+ * complete theme fragments itself (`Theme.adoptStyles()`, a microtask later, and again whenever a theme fragment is
+ * registered). Once it did, theme-upgrade.ts removes the server's complete theme `<style>`; a marked one is handled here.
  *
  * That is harmless while the server wrote the complete stylesheets (`renderSpectrum({styles: {mode: 'full'}})`), and
  * breaks the page when it wrote trimmed ones (`mode: 'trimmed'`):
@@ -43,7 +44,7 @@
  *    `adoptedStyleSheets` whenever a fragment is registered and would drop an adopted bridge. It is removed with the
  *    last marked `<style>` (confirmed by a scan of the document), or at the end of `hydrateSpectrum()` when none is
  *    left - but only from themes that have upgraded: the server `<style>` of a theme that has not (its definition
- *    loads late, or never) is all the theme has and stays where the server put it (its upgrade clears it anyway).
+ *    loads late, or never) is all the theme has and stays where the server put it.
  *  - `StyleOptions.dedupe: 'link'` (0.3.0): the server writes `<link rel="stylesheet" data-swc-styles="trimmed|
  *    minified|complete">` in place of (some of) those `<style>`s; such a `<link>` counts as a marked server `<style>`
  *    everywhere here (restored, removed, kept, counted), except that it is never bridged (theme sheets that need the
@@ -292,8 +293,8 @@ function countPendingMarked(): number {
 
 /**
  * No element runs on trimmed / minified server CSS any more: the bridged `<style>`s of UPGRADED themes go - those of a
- * theme that has not upgraded stay where the server put them (they are all that theme has; its upgrade clears its
- * declarative shadow root anyway) - and so do the kept minified `<style>`s of restored elements.
+ * theme that has not upgraded stay where the server put them (they are all that theme has) - and so do the kept
+ * minified `<style>`s of restored elements.
  */
 function dropBridges(): void {
   const dropped = bridges;
@@ -326,6 +327,20 @@ function markedStylesRemoved(count: number): void {
     pendingPartial = countPendingMarked();
     if (pendingPartial === 0) {
       dropBridges();
+    }
+  }
+}
+
+/**
+ * theme-upgrade.ts, once an upgraded `<sp-theme>` adopted its sheets (its declarative shadow root was kept): the
+ * server's theme CSS is not needed any more - complete CSS goes right away, and so does trimmed / minified CSS unless
+ * it is a bridge that elements still depend on, which `dropBridges()` removes with the last marked `<style>`.
+ */
+export function releaseAdoptedThemeStyles(host: Element, root: ShadowRoot): void {
+  const bridged = bridges.some((bridge) => bridge.host === host);
+  for (const style of serverStyleElements(root)) {
+    if (!bridged || !isPartial(style)) {
+      style.remove();
     }
   }
 }
@@ -407,8 +422,9 @@ export function bridgeServerThemes(): void {
       return;
     }
     bridges = found;
-    // `<sp-theme>` clears its declarative shadow root when it upgrades (`attachShadow()` in its constructor); our
-    // references to the `<style>` elements stay valid. `whenDefined()` resolves in the microtask checkpoint after
+    // theme-upgrade.ts keeps the theme's declarative shadow root through its upgrade, so the bridged `<style>`s
+    // normally stay in place; `reinsertBridges()` is the safety net for a theme that upgraded before this module
+    // loaded (then `attachShadow()` emptied the root, and our references to the `<style>` elements stay valid). `whenDefined()` resolves in the microtask checkpoint after
     // `customElements.define()`, in the same task as the upgrade, so nothing paints without the bridge (`define()`
     // upgrades the themes inside declarative shadow roots in the same step: shadow-including document order).
     void customElements.whenDefined('sp-theme').then(onThemeDefined);
